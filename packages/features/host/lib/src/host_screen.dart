@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:app_core/app_core.dart';
 import 'package:design_system/design_system.dart';
+import 'package:feature_host/src/eq_card.dart';
 import 'package:feature_host/src/invite_sheet.dart';
 import 'package:feature_host/src/tune_card.dart';
 import 'package:file_picker/file_picker.dart';
@@ -59,6 +60,7 @@ class HostScreen extends ConsumerWidget {
           child: _Sources(session: session, playing: status.source != null),
         ),
         if (session.capturing) GPBlock(child: _Buffer(ms: session.playoutDelayMs)),
+        const GPBlock(child: EqCard()),
         if (AndroidNative.available) _Network(hotspot: session.hotspot, busy: session.pending == SessionAction.hotspot),
       ],
     );

@@ -4,6 +4,7 @@ import 'package:app_core/src/alerts.dart';
 import 'package:app_core/src/android_caps.dart';
 import 'package:app_core/src/device_settings.dart';
 import 'package:app_core/src/engine.dart';
+import 'package:app_core/src/eq.dart';
 import 'package:app_core/src/platform/android_native.dart';
 import 'package:app_core/src/platform/ios_native.dart';
 import 'package:app_core/src/routes.dart';
@@ -182,6 +183,8 @@ class SessionController extends Notifier<SessionState> {
     final self = _memory.selfDelay;
     await rust.setHostDelayMs(ms: self.ms, tuned: self.tuned);
     await _memory.rememberHost();
+    // this phone's EQ, for everyone in the session (each speaker gets it as it joins)
+    await ref.read(eqProvider.notifier).applyToEngine(hosting: true);
     state = state.copyWith(source: SourceKind.none, clearLastTune: true);
     await _keepAlive(on: true, text: 'Hosting a Group Play session');
     unawaited(GPHaptics.success());

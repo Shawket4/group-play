@@ -5,6 +5,7 @@ export 'src/alerts.dart';
 export 'src/android_caps.dart';
 export 'src/device_settings.dart';
 export 'src/engine.dart';
+export 'src/eq.dart';
 export 'src/labels.dart';
 export 'src/platform/android_native.dart';
 export 'src/platform/ios_native.dart';

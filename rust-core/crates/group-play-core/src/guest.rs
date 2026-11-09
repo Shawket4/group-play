@@ -195,6 +195,7 @@ async fn run_session(conn: Connection, shared: Arc<Shared>) -> Result<()> {
                 match msg {
                     HostMsg::SetDelay { delay_ms } => shared.local.assigned_delay_ns.store((delay_ms * 1e6) as i64, Ordering::Relaxed),
                     HostMsg::SetVolume { volume } => shared.local.set_volume(volume as f32),
+                    HostMsg::SetEq { eq } => shared.local.set_eq(eq),
                     HostMsg::Gate { gate } => shared.local.set_gate(gate),
                     HostMsg::Kick { reason, resumable } => {
                         if resumable {

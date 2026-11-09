@@ -267,3 +267,20 @@ async fn reconnect_with_the_same_identity_stays_connected() {
     new.leave().await;
     host.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eq_reaches_every_guest_including_late_joiners() {
+    use group_play_core::eq::{EqSettings, BANDS};
+    group_play_core::logging::init();
+    let host = Host::start("Host".into(), false, None).await.unwrap();
+    let bass = EqSettings { enabled: true, boost_db: 3.0, bands_db: [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] };
+    host.set_eq(bass); // before anyone joins
+    let guest = Guest::join(host.ticket(), "Guest".into(), "linux".into(), None, false).await.unwrap();
+    assert!(wait_until(|| guest.local().eq() == bass, 10).await, "a guest joining later gets the EQ");
+    assert_eq!(host.local().eq(), bass, "the host plays through it too");
+    let flat = EqSettings { enabled: false, boost_db: 0.0, bands_db: [0.0; BANDS] };
+    host.set_eq(flat);
+    assert!(wait_until(|| guest.local().eq() == flat, 10).await, "a change reaches a connected guest");
+    guest.leave().await;
+    host.shutdown().await;
+}

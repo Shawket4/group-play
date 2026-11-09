@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod control;
+pub mod eq;
 pub mod guest;
 pub mod host;
 pub mod logging;

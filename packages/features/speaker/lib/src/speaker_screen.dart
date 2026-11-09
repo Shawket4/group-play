@@ -85,6 +85,7 @@ class SpeakerScreen extends ConsumerWidget {
           child: _Calibration(
             delayMs: l.delayMs,
             hostName: status.hostName,
+            eqActive: l.eqActive,
             volume: settings.volume,
             onVolume: (v) => unawaited(s.setVolumeLevel(v)),
           ),
@@ -105,10 +106,11 @@ class SpeakerScreen extends ConsumerWidget {
 }
 
 class _Calibration extends StatelessWidget {
-  const _Calibration({required this.delayMs, required this.hostName, required this.volume, required this.onVolume});
+  const _Calibration({required this.delayMs, required this.hostName, required this.eqActive, required this.volume, required this.onVolume});
 
   final double delayMs;
   final String hostName;
+  final bool eqActive;
   final double volume;
   final ValueChanged<double> onVolume;
 
@@ -140,6 +142,10 @@ class _Calibration extends StatelessWidget {
                 figure: true,
                 chevron: false,
               ),
+              if (eqActive) ...[
+                const GPRule(indent: GPSpace.md),
+                GPRow(title: 'Sound', subtitle: 'EQ & boost set by $hostName', value: 'On', chevron: false),
+              ],
             ],
           ),
         ),

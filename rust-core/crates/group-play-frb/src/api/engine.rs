@@ -53,6 +53,8 @@ pub struct LocalStatus {
     /// Host: its own delay came from tuning.
     pub tuned: bool,
     pub volume: f64,
+    /// The host's EQ is on and changes this phone's sound.
+    pub eq_active: bool,
     pub enabled: bool,
     pub playing: bool,
     pub sync_valid: bool,
@@ -262,6 +264,28 @@ pub async fn set_playout_delay_ms(ms: u32) -> Result<()> {
     .await
 }
 
+/// The host's EQ and boost, applied by every phone. `bands_db`: 10 bands, 32 Hz to 16 kHz.
+#[derive(Clone, Debug)]
+pub struct EqConfig {
+    pub enabled: bool,
+    pub boost_db: f64,
+    pub bands_db: Vec<f64>,
+}
+
+/// Host: sets the EQ and boost for this phone and every speaker (now and as they join).
+pub async fn set_eq(eq: EqConfig) -> Result<()> {
+    let mut bands = [0f32; engine::eq::BANDS];
+    for (b, v) in bands.iter_mut().zip(&eq.bands_db) {
+        *b = *v as f32;
+    }
+    let settings = engine::eq::EqSettings { enabled: eq.enabled, boost_db: eq.boost_db as f32, bands_db: bands };
+    with_host(move |h| {
+        h.set_eq(settings);
+        Ok(())
+    })
+    .await
+}
+
 /// Whether the host phone itself plays the synced stream.
 pub async fn set_host_local_playback(enabled: bool) -> Result<()> {
     *engine().host_local_playback.lock() = enabled;
@@ -452,6 +476,7 @@ fn local_status(l: &engine::player::PlayerShared, stream_rate: u32, sync: Option
         delay_ms: l.total_delay_ns() as f64 / 1e6,
         tuned: false,
         volume: l.volume() as f64,
+        eq_active: l.eq().is_active(),
         enabled: l.enabled.load(Ordering::Relaxed),
         playing: pos >= 0 && l.ring.highest() as i64 > pos,
         sync_valid: sync.valid && sync.samples >= 5 || sync.samples == 0 && sync.valid,
@@ -492,6 +517,7 @@ async fn snapshot() -> EngineStatus {
                 delay_ms: 0.0,
                 tuned: false,
                 volume: *e.volume.lock(),
+                eq_active: false,
                 enabled: true,
                 playing: false,
                 sync_valid: false,

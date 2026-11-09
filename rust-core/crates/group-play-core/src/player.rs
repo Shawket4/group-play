@@ -2,6 +2,7 @@
 
 use super::clock::{now_ns, CPAL_SHARES_CLOCK};
 use super::control::Controller;
+use super::eq::{EqSettings, Equalizer};
 use super::ring::PcmRing;
 use super::sync::ClockEstimate;
 use super::timeline::Timeline;
@@ -54,6 +55,9 @@ pub struct PlayerShared {
     pub position_frame: AtomicI64,
     pub device_name: Mutex<String>,
     pub error: Mutex<Option<String>>,
+    /// The host's EQ; `eq_version` bumps on every change so the renderer picks it up.
+    eq: Mutex<EqSettings>,
+    eq_version: AtomicU64,
 }
 
 impl PlayerShared {
@@ -76,6 +80,8 @@ impl PlayerShared {
             position_frame: AtomicI64::new(-1),
             device_name: Mutex::new(String::new()),
             error: Mutex::new(None),
+            eq: Mutex::new(EqSettings::default()),
+            eq_version: AtomicU64::new(0),
         })
     }
 
@@ -84,6 +90,13 @@ impl PlayerShared {
     }
     pub fn volume(&self) -> f32 {
         f32::from_bits(self.volume_bits.load(Ordering::Relaxed))
+    }
+    pub fn set_eq(&self, eq: EqSettings) {
+        *self.eq.lock() = eq.sanitized();
+        self.eq_version.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn eq(&self) -> EqSettings {
+        *self.eq.lock()
     }
     pub fn set_clock(&self, clock: ClockEstimate) {
         self.render.write().clock = clock;
@@ -118,11 +131,13 @@ pub struct Renderer {
     gain: f32,
     /// Delay used by the last callback: a change is applied at once (a jump), not slewed.
     last_delay: f64,
+    eq: Equalizer,
+    eq_version: u64,
 }
 
 impl Renderer {
     pub fn new(shared: Arc<PlayerShared>, out_rate: f64, channels: usize) -> Self {
-        Self { shared, ctl: Controller::new(), generation: u64::MAX, out_rate, channels, gain: 0.0, last_delay: 0.0 }
+        Self { shared, ctl: Controller::new(), generation: u64::MAX, out_rate, channels, gain: 0.0, last_delay: 0.0, eq: Equalizer::new(out_rate as f32), eq_version: 0 }
     }
 
     /// Fills `out` (interleaved, `self.channels` per frame) for frames whose first one is heard
@@ -186,11 +201,24 @@ impl Renderer {
             }
         });
         self.gain = target_gain;
+        self.apply_eq(out, ch);
         // Frames before the stream starts are expected silence, not underruns.
         if plan.start >= 0.0 {
             self.shared.underrun_frames.fetch_add(missing, Ordering::Relaxed);
         }
         self.shared.played_frames.fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    fn apply_eq(&mut self, out: &mut [f32], ch: usize) {
+        let v = self.shared.eq_version.load(Ordering::Relaxed);
+        if v != self.eq_version {
+            // never wait on the audio thread: if the setter holds the lock, take it next callback
+            if let Some(s) = self.shared.eq.try_lock() {
+                self.eq.configure(*s);
+                self.eq_version = v;
+            }
+        }
+        self.eq.apply(out, ch);
     }
 }
 

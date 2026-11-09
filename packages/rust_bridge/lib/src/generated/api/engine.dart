@@ -8,7 +8,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `apply_local_settings`, `end_role`, `local_status`, `snapshot`, `with_host`, `with_local`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Name shown to the other phones, and the platform ("android", "ios", ...).
 /// A new random identity key (32 bytes) for [`set_identity`]. Store it; reuse it every launch.
@@ -73,6 +73,10 @@ Future<void> stopSource() => RustLib.instance.api.crateApiEngineStopSource();
 /// Margin between capture and playout for live sources; a running capture moves to it at once. Default 300 ms.
 Future<void> setPlayoutDelayMs({required int ms}) =>
     RustLib.instance.api.crateApiEngineSetPlayoutDelayMs(ms: ms);
+
+/// Host: sets the EQ and boost for this phone and every speaker (now and as they join).
+Future<void> setEq({required EqConfig eq}) =>
+    RustLib.instance.api.crateApiEngineSetEq(eq: eq);
 
 /// Whether the host phone itself plays the synced stream.
 Future<void> setHostLocalPlayback({required bool enabled}) =>
@@ -211,6 +215,31 @@ class EngineStatus {
           lastError == other.lastError;
 }
 
+/// The host's EQ and boost, applied by every phone. `bands_db`: 10 bands, 32 Hz to 16 kHz.
+class EqConfig {
+  final bool enabled;
+  final double boostDb;
+  final Float64List bandsDb;
+
+  const EqConfig({
+    required this.enabled,
+    required this.boostDb,
+    required this.bandsDb,
+  });
+
+  @override
+  int get hashCode => enabled.hashCode ^ boostDb.hashCode ^ bandsDb.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EqConfig &&
+          runtimeType == other.runtimeType &&
+          enabled == other.enabled &&
+          boostDb == other.boostDb &&
+          bandsDb == other.bandsDb;
+}
+
 /// A timing the host remembered from an earlier session.
 class KnownTiming {
   final String peerId;
@@ -255,6 +284,9 @@ class LocalStatus {
   /// Host: its own delay came from tuning.
   final bool tuned;
   final double volume;
+
+  /// The host's EQ is on and changes this phone's sound.
+  final bool eqActive;
   final bool enabled;
   final bool playing;
   final bool syncValid;
@@ -276,6 +308,7 @@ class LocalStatus {
     required this.delayMs,
     required this.tuned,
     required this.volume,
+    required this.eqActive,
     required this.enabled,
     required this.playing,
     required this.syncValid,
@@ -299,6 +332,7 @@ class LocalStatus {
       delayMs.hashCode ^
       tuned.hashCode ^
       volume.hashCode ^
+      eqActive.hashCode ^
       enabled.hashCode ^
       playing.hashCode ^
       syncValid.hashCode ^
@@ -324,6 +358,7 @@ class LocalStatus {
           delayMs == other.delayMs &&
           tuned == other.tuned &&
           volume == other.volume &&
+          eqActive == other.eqActive &&
           enabled == other.enabled &&
           playing == other.playing &&
           syncValid == other.syncValid &&

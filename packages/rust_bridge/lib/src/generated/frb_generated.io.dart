@@ -42,10 +42,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_box_autoadd_bool(dynamic raw);
 
   @protected
+  EqConfig dco_decode_box_autoadd_eq_config(dynamic raw);
+
+  @protected
   double dco_decode_box_autoadd_f_64(dynamic raw);
 
   @protected
   EngineStatus dco_decode_engine_status(dynamic raw);
+
+  @protected
+  EqConfig dco_decode_eq_config(dynamic raw);
 
   @protected
   double dco_decode_f_64(dynamic raw);
@@ -64,6 +70,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<PeerStatus> dco_decode_list_peer_status(dynamic raw);
+
+  @protected
+  Float64List dco_decode_list_prim_f_64_strict(dynamic raw);
 
   @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
@@ -133,10 +142,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
 
   @protected
+  EqConfig sse_decode_box_autoadd_eq_config(SseDeserializer deserializer);
+
+  @protected
   double sse_decode_box_autoadd_f_64(SseDeserializer deserializer);
 
   @protected
   EngineStatus sse_decode_engine_status(SseDeserializer deserializer);
+
+  @protected
+  EqConfig sse_decode_eq_config(SseDeserializer deserializer);
 
   @protected
   double sse_decode_f_64(SseDeserializer deserializer);
@@ -155,6 +170,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<PeerStatus> sse_decode_list_peer_status(SseDeserializer deserializer);
+
+  @protected
+  Float64List sse_decode_list_prim_f_64_strict(SseDeserializer deserializer);
 
   @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
@@ -229,10 +247,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_eq_config(
+    EqConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_f_64(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_engine_status(EngineStatus self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_eq_config(EqConfig self, SseSerializer serializer);
 
   @protected
   void sse_encode_f_64(double self, SseSerializer serializer);
@@ -255,6 +282,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_peer_status(
     List<PeerStatus> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_f_64_strict(
+    Float64List self,
     SseSerializer serializer,
   );
 

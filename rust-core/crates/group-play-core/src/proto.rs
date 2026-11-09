@@ -8,13 +8,14 @@
 //!   host resets a segment that can no longer arrive in time instead of queueing stale audio.
 //! - datagrams: `Dgram` ping/pong for clock sync (unreliable on purpose: a late answer is useless).
 
+use super::eq::EqSettings;
 use super::timeline::Timeline;
 use super::tune::Gate;
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const ALPN: &[u8] = b"group-play/1";
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 const MAX_FRAME: usize = 1 << 20;
 
 /// First byte of every uni stream the host opens.
@@ -87,6 +88,8 @@ pub enum HostMsg {
     /// The delay the host assigns this guest (tuning or the host's fine adjustment).
     SetDelay { delay_ms: f64 },
     SetVolume { volume: f64 },
+    /// The host's EQ and boost; every speaker applies it to its own output.
+    SetEq { eq: EqSettings },
     /// Tuning: play only these slots of that stream (None = play everything again).
     Gate { gate: Option<Gate> },
     /// `resumable`: the host is going away for now (ended the session, app closed); a guest

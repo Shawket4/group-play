@@ -1,6 +1,7 @@
 //! The host: owns the timeline, runs the source, fans media out to every guest, answers pings.
 
 use super::clock::now_ns;
+use super::eq::EqSettings;
 use super::net;
 use super::player::{Player, PlayerShared};
 use super::proto::{self, Dgram, GuestMsg, GuestStatus, HostMsg, Media, PROTOCOL_VERSION};
@@ -100,6 +101,8 @@ struct Shared {
     live_delay_ns: AtomicI64,
     /// A live capture is running.
     live: AtomicBool,
+    /// The EQ every phone applies (sent to guests as they join and on every change).
+    eq: Mutex<EqSettings>,
 }
 
 impl Shared {
@@ -304,6 +307,7 @@ impl Host {
             tuning: AtomicBool::new(false),
             live_delay_ns: AtomicI64::new(300_000_000),
             live: AtomicBool::new(false),
+            eq: Mutex::new(EqSettings::default()),
         });
         let player = Some(Player::start(local));
         let accept = tokio::spawn(accept_loop(endpoint.clone(), shared.clone()));
@@ -356,6 +360,20 @@ impl Host {
     /// (every speaker jumps by the difference together).
     pub fn set_playout_delay_ms(&self, ms: u32) {
         self.shared.live_delay_ns.store(ms.clamp(60, 3000) as i64 * 1_000_000, Ordering::Relaxed);
+    }
+
+    /// The EQ and boost for everyone: this phone now, each speaker as the message arrives.
+    pub fn set_eq(&self, eq: EqSettings) {
+        let eq = eq.sanitized();
+        *self.shared.eq.lock() = eq;
+        self.shared.local.set_eq(eq);
+        for p in self.shared.peers.lock().values() {
+            let _ = p.cmd.send(HostMsg::SetEq { eq });
+        }
+    }
+
+    pub fn eq(&self) -> EqSettings {
+        *self.shared.eq.lock()
     }
 
     pub fn playout_delay_ms(&self) -> u32 {
@@ -805,6 +823,8 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) -> Result<()> {
     } else {
         proto::write_msg(&mut ctl_send, &HostMsg::SetDelay { delay_ms: 0.0 }).await?;
     }
+    let eq = *shared.eq.lock();
+    proto::write_msg(&mut ctl_send, &HostMsg::SetEq { eq }).await?;
     log::info!("host: {name} ({platform}) joined");
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<HostMsg>();
     let conn_no = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
