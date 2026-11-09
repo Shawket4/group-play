@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:app_core/src/alerts.dart';
 import 'package:app_core/src/android_caps.dart';
+import 'package:app_core/src/device_settings.dart';
 import 'package:app_core/src/engine.dart';
 import 'package:app_core/src/platform/android_native.dart';
 import 'package:app_core/src/platform/ios_native.dart';
@@ -74,6 +75,7 @@ final sessionProvider = NotifierProvider<SessionController, SessionState>(Sessio
 class SessionController extends Notifier<SessionState> {
   bool _hostLocalBeforeCapture = true;
   bool _draggingDelay = false;
+  bool _resumeFullShare = false;
 
   @override
   SessionState build() {
@@ -81,16 +83,53 @@ class SessionController extends Notifier<SessionState> {
       final sub = AndroidNative.events.listen(_onAndroidEvent);
       ref.onDispose(sub.cancel);
     }
+    if (IosNative.available) IosNative.onRemoteCommand(_onRemoteCommand);
     ref.listen(engineStatusProvider, (_, next) {
       final s = next.value;
       if (s == null) return;
       unawaited(_remember(s));
+      if (IosNative.available) _showNowPlaying(s);
       // the engine raises the live buffer by itself when speakers lose audio: follow it
       if (s.role == 'host' && !_draggingDelay && s.playoutDelayMs != 0 && s.playoutDelayMs != state.playoutDelayMs) {
         state = state.copyWith(playoutDelayMs: s.playoutDelayMs);
       }
     });
     return const SessionState();
+  }
+
+  // ------------------------------------------------------------------ iOS Now Playing
+
+  bool _muted = false;
+  String? _nowPlaying;
+
+  /// Keeps the lock-screen / Dynamic Island player in step with the session. iOS only treats
+  /// the app as a music app (and keeps it running in the background) while this is set.
+  void _showNowPlaying(rust.EngineStatus s) {
+    final active = s.role != 'idle';
+    final title = s.source ?? (s.role == 'host' ? 'Hosting' : 'Waiting for music');
+    final speakers = s.peers.where((p) => p.connected).length;
+    final subtitle = s.role == 'host'
+        ? 'Group Play · $speakers speaker${speakers == 1 ? '' : 's'}'
+        : 'Group Play · with ${s.hostName}';
+    final key = '$active|$title|$subtitle|$_muted';
+    if (key == _nowPlaying) return;
+    _nowPlaying = key;
+    unawaited(_quietly(() => IosNative.setNowPlaying(active: active, title: title, subtitle: subtitle, playing: !_muted)));
+  }
+
+  /// Pause/play on the lock screen, Control Center or Dynamic Island: mutes or unmutes this phone
+  /// (the session and the others keep going).
+  void _onRemoteCommand(String command) {
+    final mute = switch (command) {
+      'pause' => true,
+      'play' => false,
+      _ => !_muted,
+    };
+    _muted = mute;
+    final volume = mute ? 0.0 : ref.read(deviceSettingsProvider).volume;
+    unawaited(_quietly(() => rust.setVolume(volume: volume)));
+    final s = ref.read(engineStatusProvider).value;
+    if (s != null) _showNowPlaying(s);
   }
 
   Alerts get _alerts => ref.read(alertsProvider.notifier);
@@ -115,10 +154,16 @@ class SessionController extends Notifier<SessionState> {
     switch (e.type) {
       case 'captureStopped':
         if (state.capturing) {
+          // Full sharing dies with Shizuku (locking the phone can take it down): pick it back up
+          // as soon as Shizuku is running again, now if it still is.
+          _resumeFullShare = state.source == SourceKind.captureFull;
           state = state.copyWith(source: SourceKind.none);
           unawaited(_restoreHostLocal());
           _alerts.show('Sharing stopped: ${e.data['reason'] ?? 'unknown reason'}', tone: GPTone.warn);
+          unawaited(_resumeFullShareIfReady());
         }
+      case 'shizuku':
+        if (e.data['running'] == true && e.data['permission'] == true) unawaited(_resumeFullShareIfReady());
       case 'hotspotStopped':
         state = state.copyWith(clearHotspot: true);
         unawaited(rust.setHostWifi());
@@ -185,6 +230,11 @@ class SessionController extends Notifier<SessionState> {
       await _quietly(AndroidNative.stopLocalHotspot);
     }
     await rust.leave();
+    if (_muted) {
+      // muted from the lock screen: the next session starts at this phone's volume again
+      _muted = false;
+      await _quietly(() => rust.setVolume(volume: ref.read(deviceSettingsProvider).volume));
+    }
     await _memory.forget();
     state = state.copyWith(source: SourceKind.none, clearHotspot: true, clearLastTune: true);
     await _keepAlive(on: false, text: '');
@@ -256,7 +306,18 @@ class SessionController extends Notifier<SessionState> {
     state = state.copyWith(source: SourceKind.none);
   });
 
+  /// Restarts full sharing that Shizuku's death cut off, once Shizuku is ready again. One try
+  /// per call; choosing another source or leaving cancels it.
+  Future<void> _resumeFullShareIfReady() async {
+    if (!_resumeFullShare || ref.read(sessionRoleProvider) != SessionRole.host) return;
+    if (state.pending != null || state.source != SourceKind.none) return;
+    if (await fullCaptureBlocker() != null) return;
+    _resumeFullShare = false;
+    if (await _startCapture(CaptureMode.output)) _alerts.show('Sharing resumed');
+  }
+
   Future<void> _stopCapture() async {
+    _resumeFullShare = false;
     if (!state.capturing) return;
     await _quietly(AndroidNative.stopCapture);
     await _restoreHostLocal();

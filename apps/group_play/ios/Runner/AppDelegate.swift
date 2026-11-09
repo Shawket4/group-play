@@ -1,5 +1,6 @@
 import AVFoundation
 import Flutter
+import MediaPlayer
 import NetworkExtension
 import UIKit
 
@@ -29,9 +30,10 @@ enum GroupPlayAudioSession {
   static func configure() {
     let session = AVAudioSession.sharedInstance()
     do {
-      // mixWithOthers: another app's audio on this phone must not interrupt the speaker. An
-      // interrupted session is inactive, and iOS suspends a background app with no active audio.
-      try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+      // Not mixable on purpose: a non-mixable playback session with Now Playing info is what makes
+      // iOS treat Group Play as a music app (lock screen, Control Center, Dynamic Island) and keep
+      // it running in the background. Interruptions are handled below.
+      try session.setCategory(.playback, mode: .default, options: [])
       try session.setActive(true)
     } catch {
       NSLog("group-play: audio session setup failed: \(error)")
@@ -85,11 +87,62 @@ enum GroupPlayAudioSession {
 }
 
 /// MethodChannel "group_play/ios". Mirrors the parts of the Android channel that make sense on iOS.
+/// The lock screen, Control Center and Dynamic Island player. Play/pause go to Dart
+/// ("remoteCommand"), which mutes or unmutes this phone; nothing here can seek (it's live).
+enum GroupPlayNowPlaying {
+  static var channel: FlutterMethodChannel?
+  private static var commandsReady = false
+
+  private static let artwork: MPMediaItemArtwork? = {
+    guard let image = UIImage(named: "NowPlayingArt") else { return nil }
+    return MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+  }()
+
+  static func update(_ args: [String: Any]) {
+    guard args["active"] as? Bool == true else {
+      MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+      return
+    }
+    setUpCommands()
+    var info: [String: Any] = [
+      MPMediaItemPropertyTitle: args["title"] as? String ?? "Group Play",
+      MPMediaItemPropertyArtist: args["subtitle"] as? String ?? "",
+      MPNowPlayingInfoPropertyIsLiveStream: true,
+      MPNowPlayingInfoPropertyPlaybackRate: (args["playing"] as? Bool ?? true) ? 1.0 : 0.0,
+    ]
+    if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+  }
+
+  private static func setUpCommands() {
+    guard !commandsReady else { return }
+    commandsReady = true
+    UIApplication.shared.beginReceivingRemoteControlEvents()
+    let cc = MPRemoteCommandCenter.shared()
+    let send: (String) -> MPRemoteCommandHandlerStatus = { command in
+      channel?.invokeMethod("remoteCommand", arguments: command)
+      return .success
+    }
+    cc.playCommand.addTarget { _ in send("play") }
+    cc.pauseCommand.addTarget { _ in send("pause") }
+    cc.togglePlayPauseCommand.addTarget { _ in send("toggle") }
+    let unsupported: [MPRemoteCommand] = [
+      cc.nextTrackCommand, cc.previousTrackCommand, cc.skipForwardCommand, cc.skipBackwardCommand,
+      cc.seekForwardCommand, cc.seekBackwardCommand, cc.changePlaybackPositionCommand,
+    ]
+    for c in unsupported { c.isEnabled = false }
+  }
+}
+
 enum GroupPlayIOSChannel {
   static func register(with messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(name: "group_play/ios", binaryMessenger: messenger)
+    GroupPlayNowPlaying.channel = channel
     channel.setMethodCallHandler { call, result in
       switch call.method {
+      case "nowPlaying":
+        GroupPlayNowPlaying.update(call.arguments as? [String: Any] ?? [:])
+        result(nil)
       case "configureAudio":
         GroupPlayAudioSession.configure()
         result(GroupPlayAudioSession.info())

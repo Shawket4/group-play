@@ -36,4 +36,15 @@ class IosNative {
   }
 
   static Future<void> stopMic() => _ch.invokeMethod<void>('stopMic');
+
+  /// The lock-screen, Control Center and Dynamic Island player. [active] false clears it.
+  static Future<void> setNowPlaying({required bool active, String title = '', String subtitle = '', bool playing = true}) =>
+      _ch.invokeMethod<void>('nowPlaying', {'active': active, 'title': title, 'subtitle': subtitle, 'playing': playing});
+
+  /// Play/pause pressed on that player: "play" | "pause" | "toggle".
+  static void onRemoteCommand(void Function(String command) handler) {
+    _ch.setMethodCallHandler((call) async {
+      if (call.method == 'remoteCommand' && call.arguments is String) handler(call.arguments as String);
+    });
+  }
 }

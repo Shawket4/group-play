@@ -43,12 +43,21 @@ object NetHelpers {
         reservation?.let { r ->
             done(Result.success(describe(r))); return
         }
+        // `done` answers a Flutter call, which may happen only once: answering twice crashes the
+        // app ("Reply already submitted"). Android can report a failure after the hotspot started.
+        var answered = false
+        fun answer(r: Result<Map<String, Any>>) {
+            if (!answered) {
+                answered = true
+                done(r)
+            }
+        }
         try {
             wm.startLocalOnlyHotspot(object : WifiManager.LocalOnlyHotspotCallback() {
                 override fun onStarted(r: WifiManager.LocalOnlyHotspotReservation) {
                     reservation = r
                     // the interface gets its address a moment after onStarted
-                    main.postDelayed({ done(Result.success(describe(r))) }, 600)
+                    main.postDelayed({ answer(Result.success(describe(r))) }, 600)
                 }
 
                 override fun onStopped() {
@@ -64,11 +73,18 @@ object NetHelpers {
                         ERROR_TETHERING_DISALLOWED -> "tethering is disallowed on this phone"
                         else -> "error $reason"
                     }
-                    done(Result.failure(IllegalStateException("Hotspot failed: $why")))
+                    if (answered) {
+                        // it was running and failed later: that's the hotspot stopping
+                        Log.w("gp-net", "hotspot failed after starting: $why")
+                        reservation = null
+                        onHotspotStopped?.invoke()
+                    } else {
+                        answer(Result.failure(IllegalStateException("Hotspot failed: $why")))
+                    }
                 }
             }, main)
         } catch (e: Throwable) {
-            done(Result.failure(e))
+            answer(Result.failure(e))
         }
     }
 

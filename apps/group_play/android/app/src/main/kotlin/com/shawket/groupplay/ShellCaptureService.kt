@@ -49,41 +49,20 @@ class ShellCaptureService() : IShellCapture.Stub() {
         // it before capture: ~30 dB down. Raise it to max BEFORE the route opens (changes while it
         // is open did not apply on the emulator). The phone's speaker is silent during capture anyway.
         raiseSubmixVolume()
-        val channelMask = if (channels == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
-        val format = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(sampleRate)
-            .setChannelMask(channelMask)
-            .build()
-        val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
-        val builder = AudioRecord.Builder()
-            .setContext(ShellContext.get())
-            .setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
-            .setAudioFormat(format)
-        if (minBuf > 0) builder.setBufferSizeInBytes(8 * minBuf)
-        val rec = try {
-            builder.build()
-        } catch (e: Throwable) {
-            throw IllegalStateException("AudioRecord(REMOTE_SUBMIX) failed: ${e.javaClass.simpleName}: ${e.message}")
-        }
-        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+        var rec = openRecord(sampleRate, channels)
+        // The level is fixed when the route opens, and Android skips a device-volume change while
+        // that device is in use: a share started while the boost didn't land stayed quiet however
+        // loud the phone was turned up afterwards. If it didn't land: close, raise, reopen once.
+        val max = maxMusicVolume()
+        val v = submixVolume()
+        if (v != null && v < max) {
+            Log.w(TAG, "remote_submix media volume $v/$max with the capture open; reopening it at full volume")
+            try { rec.stop() } catch (_: Throwable) {}
             rec.release()
-            throw IllegalStateException("AudioRecord(REMOTE_SUBMIX) not initialized")
-        }
-        rec.startRecording()
-        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            rec.release()
-            throw IllegalStateException("REMOTE_SUBMIX did not start recording")
-        }
-        // Android skips a device-volume change while that device is in use, which is why full
-        // sharing was only sometimes loud: if the boost didn't land, set it again now it's open.
-        val now = submixVolume()
-        if (now != null && now < maxMusicVolume()) {
-            Log.w(TAG, "remote_submix media volume is $now after the route opened; raising it again")
             raiseSubmixVolume()
-        } else {
-            Log.i(TAG, "remote_submix media volume ${now ?: "unknown"} after the route opened")
+            rec = openRecord(sampleRate, channels)
         }
+        Log.i(TAG, "remote_submix media volume ${submixVolume() ?: "unknown"}/$max with the capture open")
         val pipe = ParcelFileDescriptor.createPipe()
         val out = FileOutputStream(pipe[1].fileDescriptor)
         record = rec
@@ -113,6 +92,38 @@ class ShellCaptureService() : IShellCapture.Stub() {
         }, "gp-shell-capture").apply { start() }
         Log.i(TAG, "REMOTE_SUBMIX capture started at $sampleRate Hz x $channels (${info()})")
         return pipe[0]
+    }
+
+    /** A started REMOTE_SUBMIX recording attributed to the shell package. */
+    @SuppressLint("MissingPermission", "WrongConstant")
+    private fun openRecord(sampleRate: Int, channels: Int): AudioRecord {
+        val channelMask = if (channels == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
+        val format = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(sampleRate)
+            .setChannelMask(channelMask)
+            .build()
+        val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
+        val builder = AudioRecord.Builder()
+            .setContext(ShellContext.get())
+            .setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
+            .setAudioFormat(format)
+        if (minBuf > 0) builder.setBufferSizeInBytes(8 * minBuf)
+        val rec = try {
+            builder.build()
+        } catch (e: Throwable) {
+            throw IllegalStateException("AudioRecord(REMOTE_SUBMIX) failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            rec.release()
+            throw IllegalStateException("AudioRecord(REMOTE_SUBMIX) not initialized")
+        }
+        rec.startRecording()
+        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            rec.release()
+            throw IllegalStateException("REMOTE_SUBMIX did not start recording")
+        }
+        return rec
     }
 
     private fun maxMusicVolume(): Int = try {

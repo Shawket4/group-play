@@ -99,7 +99,7 @@ object CaptureManager {
                     shellConn = null
                     if (mode == "output") {
                         mode = null
-                        onStopped?.invoke("Shizuku stopped. Start it again in the Shizuku app, then tap Phone Audio.")
+                        onStopped?.invoke("Shizuku stopped. Sharing picks up again as soon as it's running.")
                     }
                 }
             }
