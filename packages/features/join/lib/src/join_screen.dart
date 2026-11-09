@@ -11,16 +11,19 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 /// Scan the host's code. Then, if needed, join its hotspot; then connect.
 class JoinScreen extends ConsumerWidget {
-  const JoinScreen({super.key});
+  const JoinScreen({super.key, this.ticket});
+
+  /// From a deep link: join this host straight away.
+  final String? ticket;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    ref.listen(joinFlowProvider.select((s) => s.phase), (_, phase) {
+    final provider = joinFlowProvider(ticket);
+    ref.listen(provider.select((s) => s.phase), (_, phase) {
       if (phase == JoinPhase.joined) context.go(Routes.speaker);
     });
-    final flow = ref.watch(joinFlowProvider);
-    final camera = ref.watch(scannerProvider);
-    final n = ref.read(joinFlowProvider.notifier);
+    final flow = ref.watch(provider);
+    final n = ref.read(provider.notifier);
     final secondary = GPColors.of(context, GPColors.secondaryLabel);
 
     return CupertinoPageScaffold(
@@ -44,34 +47,40 @@ class JoinScreen extends ConsumerWidget {
                     children: [
                       ColoredBox(
                         color: CupertinoColors.black,
-                        child: MobileScanner(
-                          controller: camera,
-                          onDetect: (capture) {
-                            for (final b in capture.barcodes) {
-                              final v = b.rawValue;
-                              if (v != null) {
-                                unawaited(n.onCode(v));
-                                break;
-                              }
-                            }
-                          },
-                          errorBuilder: (context, error) => GPEmptyState(
-                            icon: CupertinoIcons.camera,
-                            title: 'Camera unavailable',
-                            message: error.errorCode == MobileScannerErrorCode.permissionDenied
-                                ? 'Allow camera access in Settings, or paste a code instead.'
-                                : 'Paste a code instead.',
-                          ),
-                        ),
+                        child: !flow.cameraWanted
+                            ? const SizedBox.expand()
+                            : MobileScanner(
+                                controller: ref.watch(scannerProvider),
+                                onDetect: (capture) {
+                                  for (final b in capture.barcodes) {
+                                    final v = b.rawValue;
+                                    if (v != null) {
+                                      unawaited(n.onCode(v));
+                                      break;
+                                    }
+                                  }
+                                },
+                                errorBuilder: (context, error) => GPEmptyState(
+                                  icon: CupertinoIcons.camera,
+                                  title: 'Camera unavailable',
+                                  message: error.errorCode == MobileScannerErrorCode.permissionDenied
+                                      ? 'Allow camera access in Settings, or paste a code instead.'
+                                      : 'Paste a code instead.',
+                                ),
+                              ),
                       ),
                       const IgnorePointer(child: Center(child: _Viewfinder())),
-                      if (flow.phase != JoinPhase.scanning) _Progress(flow: flow),
+                      if (flow.phase != JoinPhase.scanning) _Progress(flow: flow, ticket: ticket),
                     ],
                   ),
                 ),
               ),
               const SizedBox(height: GPSpace.md),
-              Text('Point the camera at the code on the host’s screen.', textAlign: TextAlign.center, style: GPText.subheadline.copyWith(color: secondary)),
+              Text(
+                'Point the camera at the code on the host’s screen.',
+                textAlign: TextAlign.center,
+                style: GPText.subheadline.copyWith(color: secondary),
+              ),
               const SizedBox(height: GPSpace.xs),
               CupertinoButton(
                 minimumSize: const Size(GPSize.minTap, GPSize.minTap),
@@ -139,13 +148,14 @@ class _CornersPainter extends CustomPainter {
 
 /// Covers the camera while joining: progress, or the manual Wi-Fi steps.
 class _Progress extends ConsumerWidget {
-  const _Progress({required this.flow});
+  const _Progress({required this.flow, required this.ticket});
 
   final JoinState flow;
+  final String? ticket;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final n = ref.read(joinFlowProvider.notifier);
+    final n = ref.read(joinFlowProvider(ticket).notifier);
     final secondary = GPColors.of(context, GPColors.secondaryLabel);
     return ColoredBox(
       color: GPColors.of(context, GPColors.surface),
@@ -160,7 +170,11 @@ class _Progress extends ConsumerWidget {
                     const SizedBox(height: GPSpace.md),
                     const Text('Join the Host’s Wi-Fi', style: GPText.title3, textAlign: TextAlign.center),
                     const SizedBox(height: GPSpace.xs),
-                    Text('In Settings › Wi-Fi, join this network, then come back.', textAlign: TextAlign.center, style: GPText.subheadline.copyWith(color: secondary)),
+                    Text(
+                      'In Settings › Wi-Fi, join this network, then come back.',
+                      textAlign: TextAlign.center,
+                      style: GPText.subheadline.copyWith(color: secondary),
+                    ),
                     const SizedBox(height: GPSpace.md),
                     _CopyLine(label: 'Network', value: flow.ssid),
                     _CopyLine(label: 'Password', value: flow.passphrase),
@@ -168,7 +182,11 @@ class _Progress extends ConsumerWidget {
                     GPButton(label: 'I’ve Joined', onPressed: n.wifiJoinedByHand),
                     if (IosNative.available) ...[
                       const SizedBox(height: GPSpace.xs),
-                      const GPButton(label: 'Open Settings', style: GPButtonStyle.secondary, onPressed: IosNative.openSettings),
+                      const GPButton(
+                        label: 'Open Settings',
+                        style: GPButtonStyle.secondary,
+                        onPressed: IosNative.openSettings,
+                      ),
                     ],
                     CupertinoButton(onPressed: n.cancel, child: const Text('Cancel')),
                   ],
@@ -179,7 +197,9 @@ class _Progress extends ConsumerWidget {
                     const CupertinoActivityIndicator(radius: 16),
                     const SizedBox(height: GPSpace.md),
                     Text(
-                      flow.phase == JoinPhase.joiningWifi ? 'Joining “${flow.ssid}”…' : 'Connecting to ${flow.hostName}…',
+                      flow.phase == JoinPhase.joiningWifi
+                          ? 'Joining “${flow.ssid}”…'
+                          : 'Connecting to ${flow.hostName}…',
                       textAlign: TextAlign.center,
                       style: GPText.headline,
                     ),
@@ -205,8 +225,16 @@ class _CopyLine extends StatelessWidget {
       onPressed: () => Clipboard.setData(ClipboardData(text: value)),
       child: Row(
         children: [
-          SizedBox(width: 90, child: Text(label, style: GPText.body.copyWith(color: GPColors.of(context, GPColors.secondaryLabel)))),
-          Expanded(child: Text(value, style: GPText.body.copyWith(color: GPColors.of(context, GPColors.label), fontWeight: FontWeight.w600))),
+          SizedBox(
+            width: 90,
+            child: Text(label, style: GPText.body.copyWith(color: GPColors.of(context, GPColors.secondaryLabel))),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: GPText.body.copyWith(color: GPColors.of(context, GPColors.label), fontWeight: FontWeight.w600),
+            ),
+          ),
           Icon(CupertinoIcons.doc_on_clipboard, size: 18, color: GPColors.of(context, GPColors.ink)),
         ],
       ),

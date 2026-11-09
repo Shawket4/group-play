@@ -90,7 +90,7 @@ class _PeerDetail extends ConsumerWidget {
         GPSection(
           header: 'Details',
           children: [
-            GPRow(title: 'Clock offset', figure: true, value: formatMs(peer.syncOffsetMs, digits: 2)),
+            GPRow(title: 'Sync accuracy', figure: true, value: '±${formatMs(peer.rttMs / 2, digits: 2)}'),
             GPRow(title: 'Clock drift', figure: true, value: '${peer.skewPpm.toStringAsFixed(1)} ppm'),
             GPRow(title: 'Lock error', figure: true, value: formatMs(peer.errMs, digits: 2)),
             GPRow(title: 'Buffered', figure: true, value: formatMs(peer.bufferMs, digits: 0)),

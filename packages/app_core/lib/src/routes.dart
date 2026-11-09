@@ -9,6 +9,10 @@ abstract final class Routes {
   static const localSpeakerId = 'local';
 
   static const join = '/join';
+
+  /// What the host's QR code holds: opens Group Play on the join screen with the ticket
+  /// (`groupplay://app/join?t=GPLAY1:…`). Scanned in-app or by the phone's camera.
+  static String joinLink(String ticket) => 'groupplay://app/join?t=$ticket';
   static const speaker = '/speaker';
   static const settings = '/settings';
   static const settingsName = '/settings/name';

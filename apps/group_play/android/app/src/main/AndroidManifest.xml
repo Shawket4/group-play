@@ -54,6 +54,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- groupplay://app/join?t=GPLAY1:… — the host's QR code, scanned by any camera app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="groupplay" android:host="app" />
+            </intent-filter>
+            <meta-data android:name="flutter_deeplinking_enabled" android:value="true" />
         </activity>
 
         <!-- Keeps a host or listener alive with the screen off; upgraded to mediaProjection

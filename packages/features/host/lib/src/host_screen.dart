@@ -49,7 +49,7 @@ class HostScreen extends ConsumerWidget {
               ? 'On another phone open Group Play, tap Join as a Speaker, and scan this code.'
               : '$connected ${connected == 1 ? 'speaker' : 'speakers'} connected. More can join any time.',
           children: [
-            GPQrCell(data: status.ticket ?? '', caption: 'Scan with Group Play'),
+            GPQrCell(data: Routes.joinLink(status.ticket ?? ''), caption: 'Scan with Group Play or the Camera app'),
           ],
         ),
         if (AndroidNative.available) _HotspotSection(hotspot: session.hotspot, busy: session.pending == SessionAction.hotspot),

@@ -97,8 +97,7 @@ class SpeakerScreen extends ConsumerWidget {
         GPSection(
           header: 'Details',
           children: [
-            GPRow(title: 'Clock offset', figure: true, value: formatMs(l.syncOffsetMs, digits: 2)),
-            GPRow(title: 'Best round trip', figure: true, value: formatMs(l.syncRttMs, digits: 2)),
+            GPRow(title: 'Sync accuracy', figure: true, value: '±${formatMs(l.syncRttMs / 2, digits: 2)}'),
             GPRow(title: 'Clock drift', figure: true, value: '${l.skewPpm.toStringAsFixed(1)} ppm'),
             GPRow(title: 'Lock error', figure: true, value: formatMs(l.errMs, digits: 2)),
             GPRow(title: 'Buffered', figure: true, value: formatMs(l.bufferMs, digits: 0)),

@@ -80,5 +80,18 @@
 	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.shawket.groupplay.join</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>groupplay</string>
+			</array>
+		</dict>
+	</array>
+	<key>FlutterDeepLinkingEnabled</key>
+	<true/>
 </dict>
 </plist>

@@ -31,7 +31,7 @@ final routerProvider = Provider<GoRouter>((ref) {
               ),
             ],
           ),
-          GoRoute(path: 'join', pageBuilder: (c, s) => _page(s, const JoinScreen())),
+          GoRoute(path: 'join', pageBuilder: (c, s) => _page(s, JoinScreen(ticket: s.uri.queryParameters['t']))),
           GoRoute(path: 'speaker', pageBuilder: (c, s) => _page(s, const SpeakerScreen())),
           GoRoute(
             path: 'settings',

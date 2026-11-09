@@ -3,13 +3,21 @@ import 'dart:async';
 import 'package:app_core/app_core.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show NotifierProviderFamily;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:rust_bridge/rust_bridge.dart' as rust;
 
 enum JoinPhase { scanning, joiningWifi, needsWifi, connecting, joined }
 
 class JoinState {
-  const JoinState({this.phase = JoinPhase.scanning, this.hostName = '', this.ssid = '', this.passphrase = '', this.ticket = ''});
+  const JoinState({
+    this.phase = JoinPhase.scanning,
+    this.hostName = '',
+    this.ssid = '',
+    this.passphrase = '',
+    this.ticket = '',
+    this.cameraWanted = true,
+  });
 
   final JoinPhase phase;
   final String hostName;
@@ -17,12 +25,16 @@ class JoinState {
   final String passphrase;
   final String ticket;
 
+  /// False while a deep-linked ticket is being joined: no camera (and no camera prompt).
+  final bool cameraWanted;
+
   JoinState copyWith({JoinPhase? phase, String? hostName, String? ssid, String? passphrase, String? ticket}) => JoinState(
         phase: phase ?? this.phase,
         hostName: hostName ?? this.hostName,
         ssid: ssid ?? this.ssid,
         passphrase: passphrase ?? this.passphrase,
         ticket: ticket ?? this.ticket,
+        cameraWanted: cameraWanted,
       );
 }
 
@@ -33,12 +45,26 @@ final Provider<MobileScannerController> scannerProvider = Provider.autoDispose<M
   return c;
 });
 
-/// Scan → (join the host's hotspot) → connect.
-final NotifierProvider<JoinFlow, JoinState> joinFlowProvider = NotifierProvider.autoDispose<JoinFlow, JoinState>(JoinFlow.new);
+/// Scan → (join the host's hotspot) → connect. The argument is a ticket that arrived with a
+/// deep link (the phone's camera scanned the host's code): the flow starts with it.
+final NotifierProviderFamily<JoinFlow, JoinState, String?> joinFlowProvider =
+    NotifierProvider.autoDispose.family<JoinFlow, JoinState, String?>(JoinFlow.new);
 
 class JoinFlow extends Notifier<JoinState> {
+  JoinFlow(this.initialTicket);
+
+  final String? initialTicket;
+
   @override
-  JoinState build() => const JoinState();
+  JoinState build() {
+    final t = initialTicket;
+    if (t != null && t.isNotEmpty) {
+      // after build returns, so the initial state is in place first
+      unawaited(Future.microtask(() => onCode(t)));
+      return const JoinState(cameraWanted: false);
+    }
+    return const JoinState();
+  }
 
   MobileScannerController get _camera => ref.read(scannerProvider);
 
@@ -51,8 +77,9 @@ class JoinFlow extends Notifier<JoinState> {
     } on Object {
       return false;
     }
-    state = JoinState(phase: JoinPhase.connecting, hostName: info.hostName, ticket: raw);
-    unawaited(_camera.stop());
+    final camera = state.cameraWanted;
+    state = JoinState(phase: JoinPhase.connecting, hostName: info.hostName, ticket: raw, cameraWanted: camera);
+    if (camera) unawaited(_camera.stop());
     final ssid = info.wifiSsid ?? '';
     if (ssid.isNotEmpty) {
       state = state.copyWith(phase: JoinPhase.joiningWifi, ssid: ssid, passphrase: info.wifiPassphrase ?? '');
@@ -76,9 +103,11 @@ class JoinFlow extends Notifier<JoinState> {
     if (!ours) ref.read(alertsProvider.notifier).show('The clipboard has no Group Play code.');
   }
 
+  /// Back to scanning (also after a deep-linked join failed: then the camera comes up).
   void cancel() {
+    final hadCamera = state.cameraWanted;
     state = const JoinState();
-    unawaited(_camera.start());
+    if (hadCamera) unawaited(_camera.start());
   }
 
   Future<void> _connect() async {
