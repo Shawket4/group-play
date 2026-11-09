@@ -49,13 +49,13 @@ Prereqs: Flutter 3.47+, Xcode, CocoaPods, Rust (rustup) — cargokit builds the 
 target during the Flutter build and adds the rustup targets itself.
 
 ```bash
-git clone git@github.com:Shawket4/group-play.git && cd group-play
+git clone git@github.com:Shawket4/group-play.git && cd group-play   # renamed from "tutti"
 dart pub global activate melos   # once
 flutter pub get                  # resolves the whole workspace
 
 cd apps/group_play
 flutter run -d <iphone>          # iOS (first build compiles the Rust engine: ~5-10 min)
-flutter run -d <android-phone>   # Android (or: flutter build apk --release)
+flutter run -d <android-phone>   # Android, or install the APK from the GitHub release
 ```
 
 iOS signing: open `apps/group_play/ios/Runner.xcworkspace`, set your team on the Runner target
@@ -73,24 +73,42 @@ cd rust-core && cargo run --release --example cli -- join GPLAY1:...   # headles
 
 ## Test plan (phones)
 
-1. **Same Wi-Fi, sync test.** Phone A: *Host a Session* → *Sync Test*. Phone B: *Join as a
-   Speaker* → scan. Within ~3 s B shows *In sync*. Put the phones side by side: the clicks should
-   sound like one click. If one is consistently early/late (Bluetooth speakers, some DACs), open
-   it (host: Speakers → tap it; speaker: its own screen) and nudge *Timing*. Note the value.
-2. **Music file.** Host → *Music File* → pick a song. Walk between the phones.
-3. **Full sharing (Android host).** Settings › Full Sharing Setup → install Shizuku, start it
-   (wireless debugging), allow Group Play. Host → *Everything This Phone Plays*. Open Spotify on
-   the host and play: the host goes quiet, the speakers play Spotify. Then Chrome/YouTube.
-   This is the item still unproven on a real phone (proven on the Android 15 emulator).
-4. **Basic sharing.** Host → *Apps That Allow Capture* → accept the screen-capture prompt →
-   play YouTube Music.
-5. **Hotspot.** Turn the host's Wi-Fi hotspot on in the app; join from Android (one tap) and
-   iPhone (Camera → Wi-Fi code, then scan the join code).
-6. **Screen off / background.** Lock both phones: playback continues (foreground service on
-   Android, background audio on iOS).
+1. **Same Wi-Fi, sync test.** Phone A: *Host a Session* → *Sync Test* tile. Phone B: scan A's
+   code with the Camera app (opens Group Play straight into the session) or *Join as a
+   Speaker* → scan. Within ~3 s B shows *In sync* and its gauge needle sits on 0. Put the
+   phones side by side: the clicks should sound like one click. If one is consistently
+   early/late (Bluetooth speakers, some DACs), nudge its *Timing* (speaker screen, or host →
+   tap its avatar). Note the value.
+2. **Music file.** Host → *Music File* tile → pick a song.
+3. **Full sharing (Android host).** Host → *Phone Audio* tile → the setup guide (install
+   Shizuku, start it over wireless debugging, allow Group Play) → *Start Sharing*. Play
+   Spotify on the host: the host goes quiet, the speakers play it. Then Chrome/YouTube.
+4. **Basic sharing.** Host → *Allowed Apps* tile → accept the screen-capture prompt → play
+   YouTube Music.
+5. **Hotspot.** Host → Network → Hotspot on. Android speakers join from the code; iPhones scan
+   the Wi-Fi code in the Invite sheet with the Camera app first.
+6. **Screen off / background.** Lock all phones: playback continues.
 
-If something is off: Settings › Logs → Copy, and the per-speaker *Details* rows (offset, drift,
+If something is off: Settings › Logs → Copy, and the speaker's *Details* (accuracy, drift,
 lock error, buffered, dropouts) say where it is.
+
+### What was verified before handing over (Android 15 emulator + this Linux box)
+
+- Engine: 16 unit tests + 3 end-to-end tests (real iroh host/guest in one process: lockstep
+  within 1 ms, live capture with a 50 ppm fast clock, join-before-play).
+- App, by driving the real UI: host; join by deep link → *In sync* against a Linux host
+  (lock error 0.00–0.01 ms, direct path, ~1 ms RTT); leave; sync test; music file (44.1 kHz WAV);
+  full sharing via Shizuku (`REMOTE_SUBMIX` as uid 2000, tone captured at full level);
+  basic sharing (MediaProjection); hotspot (SSID/password into the code); end session (capture,
+  projection, hotspot and service all released); light and dark mode.
+- **Watch item, Android host → speakers:** on the emulator the host's *outgoing* stream dies
+  on the direct path once audio flows (pings survive, full-size batches vanish) and iroh only
+  recovers over the relay ~25 s later. It looks like the emulator's virtual NIC dropping
+  segmented UDP batches (the other direction, Linux host → emulator speaker, is flawless),
+  but it has not been ruled out on a real phone yet. If an Android host's speakers show
+  *Settling* with no sound, the host's Logs will say "guest is behind, skipped … chunks".
+- Not runnable here: the iOS build (needs Xcode). Swift side: `AppDelegate.swift` (playback
+  audio session, `group_play/ios` channel), Info.plist keys, URL scheme, Podfile (iOS 16).
 
 ## Open items
 
