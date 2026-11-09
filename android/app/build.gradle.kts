@@ -29,6 +29,11 @@ android {
         versionName = flutter.versionName
     }
 
+    buildFeatures {
+        aidl = true
+        buildConfig = true
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
@@ -46,4 +51,10 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Shizuku: run the whole-output capture as the adb shell user (no root).
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }

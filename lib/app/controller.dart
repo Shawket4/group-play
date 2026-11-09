@@ -148,6 +148,13 @@ class TuttiController extends ChangeNotifier {
         await _keepAlive(true, 'Playing with ${info.hostName}');
       });
 
+  /// Connects to the host only (the caller already handled the ticket's Wi-Fi).
+  Future<void> joinTicketOnly(String ticket) => _run(() async {
+        final info = rust.parseTicket(ticket: ticket);
+        await rust.join(ticket: ticket);
+        await _keepAlive(true, 'Playing with ${info.hostName}');
+      });
+
   /// Tries to join the host's hotspot. Returns false when the user has to do it by hand.
   Future<bool> joinWifi(String ssid, String pass) async {
     try {
@@ -234,7 +241,7 @@ class TuttiController extends ChangeNotifier {
           fd: h.fd,
           sampleRate: h.sampleRate,
           channels: h.channels,
-          label: mode == CaptureMode.output ? "${deviceName}'s audio" : "${deviceName}'s audio (basic)",
+          label: mode == CaptureMode.output ? "$deviceName's audio" : "$deviceName's audio (basic)",
         );
         source = mode == CaptureMode.output ? SourceKind.captureFull : SourceKind.captureBasic;
         await refreshCaps();
