@@ -1115,6 +1115,7 @@ dependencies = [
  "iroh",
  "libc",
  "log",
+ "objc2-avf-audio",
  "parking_lot",
  "postcard",
  "serde",

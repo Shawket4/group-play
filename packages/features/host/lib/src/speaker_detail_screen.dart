@@ -18,7 +18,10 @@ class SpeakerDetailScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(engineStatusProvider).value;
     if (status == null) {
-      return const CupertinoPageScaffold(backgroundColor: GPColors.background, child: Center(child: CupertinoActivityIndicator()));
+      return const CupertinoPageScaffold(
+        backgroundColor: GPColors.background,
+        child: Center(child: CupertinoActivityIndicator()),
+      );
     }
     if (id == Routes.localSpeakerId) return _LocalDetail(status: status);
     final peer = status.peers.where((p) => p.id == id).firstOrNull;
@@ -26,7 +29,11 @@ class SpeakerDetailScreen extends ConsumerWidget {
       return const GPPage(
         title: 'Speaker',
         previousPageTitle: 'Hosting',
-        slivers: [SliverToBoxAdapter(child: GPEmptyState(icon: CupertinoIcons.speaker_2_fill, title: 'This speaker left'))],
+        slivers: [
+          SliverToBoxAdapter(
+            child: GPEmptyState(icon: CupertinoIcons.speaker_2_fill, title: 'This speaker left'),
+          ),
+        ],
       );
     }
     return _PeerDetail(peer: peer, source: status.source);
@@ -34,10 +41,20 @@ class SpeakerDetailScreen extends ConsumerWidget {
 }
 
 class _CalibrationCard extends StatelessWidget {
-  const _CalibrationCard({required this.label, required this.delayMs, required this.volume, required this.onDelay, required this.onVolume, this.onDelayEnd, this.onVolumeEnd});
+  const _CalibrationCard({
+    required this.label,
+    required this.delayMs,
+    required this.tuned,
+    required this.volume,
+    required this.onDelay,
+    required this.onVolume,
+    this.onDelayEnd,
+    this.onVolumeEnd,
+  });
 
   final String label;
   final double delayMs;
+  final bool tuned;
   final double volume;
   final ValueChanged<double> onDelay;
   final ValueChanged<double> onVolume;
@@ -61,7 +78,9 @@ class _CalibrationCard extends StatelessWidget {
                 max: 200,
                 step: 1,
                 format: formatSignedMs,
-                hint: 'Early compared with the others? Add delay. Late? Take some away.',
+                hint: tuned
+                    ? 'Set by tuning. Still early compared with the others? Add delay. Late? Take some away.'
+                    : 'Tune sets this by ear. Or by hand: early compared with the others? Add delay. Late? Take some away.',
                 onChanged: onDelay,
                 onChangeEnd: onDelayEnd,
               ),
@@ -112,7 +131,11 @@ class _PeerDetail extends ConsumerWidget {
             active: peer.connected && peer.playing,
             badges: [
               if (peer.connected) GPBadge(linkLabel(peer.path, peer.rttMs), icon: CupertinoIcons.wifi),
-              GPBadge(peer.platform == 'ios' ? 'iPhone' : (peer.platform == 'android' ? 'Android' : peer.platform), icon: CupertinoIcons.device_phone_portrait),
+              if (peer.tuned) const GPBadge('Tuned', icon: CupertinoIcons.tuningfork),
+              GPBadge(
+                peer.platform == 'ios' ? 'iPhone' : (peer.platform == 'android' ? 'Android' : peer.platform),
+                icon: CupertinoIcons.device_phone_portrait,
+              ),
             ],
           ),
         ),
@@ -120,12 +143,14 @@ class _PeerDetail extends ConsumerWidget {
           child: _CalibrationCard(
             label: 'Calibration',
             delayMs: drafts[delayKey] ?? peer.delayMs,
+            tuned: peer.tuned,
             volume: drafts[volKey] ?? peer.volume,
-            onDelay: (v) {
-              d.set(delayKey, v);
+            // sent when the finger lifts: each timing change is applied at once (a short fade)
+            onDelay: (v) => d.set(delayKey, v),
+            onDelayEnd: (v) {
               unawaited(n.setPeerDelay(peer.id, v));
+              d.release(delayKey);
             },
-            onDelayEnd: (_) => d.release(delayKey),
             onVolume: (v) {
               d.set(volKey, v);
               unawaited(n.setPeerVolume(peer.id, v));
@@ -160,31 +185,40 @@ class _LocalDetail extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(deviceSettingsProvider);
     final s = ref.read(deviceSettingsProvider.notifier);
-    final capturing = ref.watch(sessionProvider.select((x) => x.capturing));
+    final basic = ref.watch(sessionProvider.select((x) => x.source == SourceKind.captureBasic));
+    final drafts = ref.watch(sliderDraftsProvider);
+    final d = ref.read(sliderDraftsProvider.notifier);
+    final n = ref.read(sessionProvider.notifier);
+    const delayKey = 'local:delay';
     final l = status.local;
     return GPPage(
       title: settings.name,
       previousPageTitle: 'Hosting',
       slivers: [
         GPSection(
-          footer: capturing
-              ? 'While this phone shares its own audio it stays quiet: the speakers play it.'
+          footer: basic
+              ? 'With basic sharing the app plays here directly, ahead of the speakers. Full sharing keeps this phone in step.'
               : 'Turn off to use this phone only as the remote.',
           children: [
             GPSwitchRow(
               leading: const GPIconTile(CupertinoIcons.speaker_2_fill),
               title: 'Play Along',
-              value: l.enabled && !capturing,
-              onChanged: capturing ? null : (v) => ref.read(sessionProvider.notifier).setHostLocal(v),
+              value: l.enabled && !basic,
+              onChanged: basic ? null : n.setHostLocal,
             ),
           ],
         ),
         GPBlock(
           child: _CalibrationCard(
             label: 'This phone',
-            delayMs: settings.delayMs,
+            delayMs: drafts[delayKey] ?? l.delayMs,
+            tuned: l.tuned,
             volume: settings.volume,
-            onDelay: (v) => unawaited(s.setDelay(v)),
+            onDelay: (v) => d.set(delayKey, v),
+            onDelayEnd: (v) {
+              unawaited(n.setHostDelay(v));
+              d.release(delayKey);
+            },
             onVolume: (v) => unawaited(s.setVolumeLevel(v)),
           ),
         ),

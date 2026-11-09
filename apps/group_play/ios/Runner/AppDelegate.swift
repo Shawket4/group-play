@@ -85,6 +85,11 @@ enum GroupPlayIOSChannel {
             }
           }
         }
+      case "startMic":
+        GroupPlayMic.start(result: result)
+      case "stopMic":
+        GroupPlayMic.stop()
+        result(nil)
       case "openSettings":
         if let url = URL(string: UIApplication.openSettingsURLString) {
           UIApplication.shared.open(url)
@@ -94,5 +99,87 @@ enum GroupPlayIOSChannel {
         result(FlutterMethodNotImplemented)
       }
     }
+  }
+}
+
+/// The host's microphone for tuning: mono s16le into a pipe whose read end goes to the engine.
+/// The session is switched to play-and-record (measurement mode: no voice processing, output
+/// still on the speaker) while it listens, and back to playback after.
+enum GroupPlayMic {
+  private static var engine: AVAudioEngine?
+  private static var writeFd: Int32 = -1
+
+  static func start(result: @escaping FlutterResult) {
+    AVAudioSession.sharedInstance().requestRecordPermission { granted in
+      DispatchQueue.main.async {
+        guard granted else {
+          result(FlutterError(code: "mic", message: "Allow the microphone in Settings so this phone can listen while tuning.", details: nil))
+          return
+        }
+        do {
+          result(try startEngine())
+        } catch {
+          stop()
+          result(FlutterError(code: "mic", message: "The microphone did not start: \(error.localizedDescription)", details: nil))
+        }
+      }
+    }
+  }
+
+  private static func startEngine() throws -> [String: Any] {
+    stop()
+    let session = AVAudioSession.sharedInstance()
+    try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+    try session.setActive(true)
+    let engine = AVAudioEngine()
+    let input = engine.inputNode
+    let format = input.outputFormat(forBus: 0)
+    guard format.sampleRate > 0, format.channelCount > 0 else {
+      throw NSError(domain: "group-play", code: 1, userInfo: [NSLocalizedDescriptionKey: "no microphone input"])
+    }
+    var fds: [Int32] = [-1, -1]
+    guard pipe(&fds) == 0 else {
+      throw NSError(domain: "group-play", code: 2, userInfo: [NSLocalizedDescriptionKey: "pipe failed"])
+    }
+    // the engine closes its end when tuning is done: get EPIPE, not a SIGPIPE that kills the app
+    _ = fcntl(fds[1], F_SETNOSIGPIPE, 1)
+    let fd = fds[1]
+    writeFd = fd
+    input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
+      guard let channels = buffer.floatChannelData else { return }
+      let n = Int(buffer.frameLength)
+      var pcm = [Int16](repeating: 0, count: n)
+      let src = channels[0]
+      for i in 0..<n {
+        pcm[i] = Int16(max(-1.0, min(1.0, src[i])) * 32767.0)
+      }
+      pcm.withUnsafeBytes { raw in
+        guard var p = raw.baseAddress else { return }
+        var left = raw.count
+        while left > 0 {
+          let w = write(fd, p, left)
+          if w <= 0 { return }
+          p = p.advanced(by: w)
+          left -= w
+        }
+      }
+    }
+    try engine.start()
+    self.engine = engine
+    NSLog("group-play: mic recording at \(format.sampleRate) Hz")
+    return ["fd": Int(fds[0]), "sampleRate": Int(format.sampleRate), "channels": 1]
+  }
+
+  static func stop() {
+    if let engine = engine {
+      engine.inputNode.removeTap(onBus: 0)
+      engine.stop()
+    }
+    engine = nil
+    if writeFd >= 0 {
+      close(writeFd)
+      writeFd = -1
+    }
+    GroupPlayAudioSession.configure()
   }
 }

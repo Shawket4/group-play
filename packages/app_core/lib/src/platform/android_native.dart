@@ -22,18 +22,18 @@ class AndroidCapabilities {
   });
 
   factory AndroidCapabilities.fromMap(Map<dynamic, dynamic> m) => AndroidCapabilities(
-        sdkInt: (m['sdkInt'] as num?)?.toInt() ?? 0,
-        manufacturer: m['manufacturer'] as String? ?? '',
-        model: m['model'] as String? ?? '',
-        playbackCaptureSupported: m['playbackCaptureSupported'] == true,
-        outputCaptureSupported: m['outputCaptureSupported'] == true,
-        shizukuInstalled: m['shizukuInstalled'] == true,
-        shizukuRunning: m['shizukuRunning'] == true,
-        shizukuPermission: m['shizukuPermission'] == true,
-        shizukuUid: (m['shizukuUid'] as num?)?.toInt(),
-        recordAudioGranted: m['recordAudioGranted'] == true,
-        notificationsGranted: m['notificationsGranted'] == true,
-      );
+    sdkInt: (m['sdkInt'] as num?)?.toInt() ?? 0,
+    manufacturer: m['manufacturer'] as String? ?? '',
+    model: m['model'] as String? ?? '',
+    playbackCaptureSupported: m['playbackCaptureSupported'] == true,
+    outputCaptureSupported: m['outputCaptureSupported'] == true,
+    shizukuInstalled: m['shizukuInstalled'] == true,
+    shizukuRunning: m['shizukuRunning'] == true,
+    shizukuPermission: m['shizukuPermission'] == true,
+    shizukuUid: (m['shizukuUid'] as num?)?.toInt(),
+    recordAudioGranted: m['recordAudioGranted'] == true,
+    notificationsGranted: m['notificationsGranted'] == true,
+  );
 
   static const none = AndroidCapabilities(
     sdkInt: 0,
@@ -69,7 +69,6 @@ class AndroidCapabilities {
 
   /// Full capture can start right now.
   bool get fullCaptureReady => outputCaptureSupported && shizukuRunning && shizukuPermission;
-
 }
 
 /// "output" = everything the phone plays (Shizuku). "playback" = apps that allow capture.
@@ -122,8 +121,7 @@ class AndroidNative {
     return AndroidCapabilities.fromMap(m ?? const {});
   }
 
-  static Future<bool> requestShizukuPermission() async =>
-      await _ch.invokeMethod<bool>('requestShizukuPermission') ?? false;
+  static Future<bool> requestShizukuPermission() async => await _ch.invokeMethod<bool>('requestShizukuPermission') ?? false;
 
   /// Keys: audio, notifications, nearbyWifi, location.
   static Future<Map<String, bool>> requestPermissions(List<String> list) async {
@@ -146,6 +144,20 @@ class AndroidNative {
   }
 
   static Future<void> stopCapture() => _ch.invokeMethod<void>('stopCapture');
+
+  /// Starts the microphone for tuning (needs the "audio" permission). Other apps' music pauses
+  /// while it records. Mono s16le; the engine owns the fd.
+  static Future<CaptureHandle> startMic({int sampleRate = 48000}) async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('startMic', {'sampleRate': sampleRate});
+    if (m == null) throw PlatformException(code: 'mic', message: 'no microphone handle');
+    return CaptureHandle(
+      fd: (m['fd'] as num).toInt(),
+      sampleRate: (m['sampleRate'] as num?)?.toInt() ?? sampleRate,
+      channels: (m['channels'] as num?)?.toInt() ?? 1,
+    );
+  }
+
+  static Future<void> stopMic() => _ch.invokeMethod<void>('stopMic');
 
   static Future<void> startSessionService({required String title, required String text}) =>
       _ch.invokeMethod<void>('startSessionService', {'title': title, 'text': text});

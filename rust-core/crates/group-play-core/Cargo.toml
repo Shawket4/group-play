@@ -22,5 +22,8 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "a
 data-encoding = "2"
 libc = "0.2"
 
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVAudioSession", "AVAudioSessionTypes"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util", "test-util"] }

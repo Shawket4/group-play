@@ -8,9 +8,20 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `apply_local_settings`, `end_role`, `local_status`, `snapshot`, `with_host`, `with_local`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Name shown to the other phones, and the platform ("android", "ios", ...).
+/// A new random identity key (32 bytes) for [`set_identity`]. Store it; reuse it every launch.
+Uint8List newIdentity() => RustLib.instance.api.crateApiEngineNewIdentity();
+
+/// This phone's identity from now on: its id (and as host, its ticket) stays the same across
+/// launches, so remembered sessions find each other again.
+void setIdentity({required List<int> key}) =>
+    RustLib.instance.api.crateApiEngineSetIdentity(key: key);
+
+/// This phone's id as the other phones see it (same as a host's peer id for it).
+String? identityId() => RustLib.instance.api.crateApiEngineIdentityId();
+
 void configure({required String deviceName, required String platform}) =>
     RustLib.instance.api.crateApiEngineConfigure(
       deviceName: deviceName,
@@ -67,6 +78,32 @@ Future<void> setPlayoutDelayMs({required int ms}) =>
 Future<void> setHostLocalPlayback({required bool enabled}) =>
     RustLib.instance.api.crateApiEngineSetHostLocalPlayback(enabled: enabled);
 
+/// Android: route the host's own playback straight to the speaker/headphones. Needed while full
+/// sharing records the phone's output: the default route would lead into that recording.
+Future<void> setHostExplicitRoute({required bool enabled}) =>
+    RustLib.instance.api.crateApiEngineSetHostExplicitRoute(enabled: enabled);
+
+/// Timings remembered from earlier sessions; applied when those speakers join.
+Future<void> setKnownTimings({required List<KnownTiming> timings}) =>
+    RustLib.instance.api.crateApiEngineSetKnownTimings(timings: timings);
+
+/// The host phone's own delay (ms, positive = later). `tuned`: it came from tuning.
+Future<void> setHostDelayMs({required double ms, bool? tuned}) =>
+    RustLib.instance.api.crateApiEngineSetHostDelayMs(ms: ms, tuned: tuned);
+
+/// Tunes every connected speaker by ear: each phone chirps in turn while this phone's
+/// microphone (`mic_fd`: s16le, `mic_channels` interleaved) listens. Takes 4–10 s. Applies the
+/// new delays and returns what it found. The engine owns `mic_fd`; stop the recording after.
+Future<TuneReport> tuneSpeakers({
+  required int micFd,
+  required int micRate,
+  required int micChannels,
+}) => RustLib.instance.api.crateApiEngineTuneSpeakers(
+  micFd: micFd,
+  micRate: micRate,
+  micChannels: micChannels,
+);
+
 Future<void> setPeerDelayMs({required String peerId, required double ms}) =>
     RustLib.instance.api.crateApiEngineSetPeerDelayMs(peerId: peerId, ms: ms);
 
@@ -79,9 +116,10 @@ Future<void> setPeerVolume({required String peerId, required double volume}) =>
 TicketInfo parseTicket({required String ticket}) =>
     RustLib.instance.api.crateApiEngineParseTicket(ticket: ticket);
 
-/// Joins a host. Returns the host's name once connected.
-Future<String> join({required String ticket}) =>
-    RustLib.instance.api.crateApiEngineJoin(ticket: ticket);
+/// Joins a host. Returns the host's name once connected. `wait`: a remembered session; do not
+/// fail if the host is not up yet, keep trying in the background (state "waiting").
+Future<String> join({required String ticket, required bool wait}) =>
+    RustLib.instance.api.crateApiEngineJoin(ticket: ticket, wait: wait);
 
 /// Ends hosting or leaves the session.
 Future<void> leave() => RustLib.instance.api.crateApiEngineLeave();
@@ -97,10 +135,15 @@ class EngineStatus {
   /// "idle" | "host" | "guest"
   final String role;
 
-  /// Guest: "connecting" | "connected" | "reconnecting" | "ended". Host: "hosting".
+  /// Guest: "connected" | "reconnecting" | "waiting" (host away) | "ended". Host: "hosting".
   final String state;
   final String hostName;
+
+  /// Host: its join ticket. Guest: the host's latest ticket (remember this one).
   final String? ticket;
+
+  /// Host: tuning is running.
+  final bool tuning;
   final String path;
   final double pathRttMs;
   final String? source;
@@ -115,6 +158,7 @@ class EngineStatus {
     required this.state,
     required this.hostName,
     this.ticket,
+    required this.tuning,
     required this.path,
     required this.pathRttMs,
     this.source,
@@ -131,6 +175,7 @@ class EngineStatus {
       state.hashCode ^
       hostName.hashCode ^
       ticket.hashCode ^
+      tuning.hashCode ^
       path.hashCode ^
       pathRttMs.hashCode ^
       source.hashCode ^
@@ -149,6 +194,7 @@ class EngineStatus {
           state == other.state &&
           hostName == other.hostName &&
           ticket == other.ticket &&
+          tuning == other.tuning &&
           path == other.path &&
           pathRttMs == other.pathRttMs &&
           source == other.source &&
@@ -157,6 +203,31 @@ class EngineStatus {
           local == other.local &&
           endedReason == other.endedReason &&
           lastError == other.lastError;
+}
+
+/// A timing the host remembered from an earlier session.
+class KnownTiming {
+  final String peerId;
+  final double delayMs;
+  final bool tuned;
+
+  const KnownTiming({
+    required this.peerId,
+    required this.delayMs,
+    required this.tuned,
+  });
+
+  @override
+  int get hashCode => peerId.hashCode ^ delayMs.hashCode ^ tuned.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KnownTiming &&
+          runtimeType == other.runtimeType &&
+          peerId == other.peerId &&
+          delayMs == other.delayMs &&
+          tuned == other.tuned;
 }
 
 class LocalStatus {
@@ -168,7 +239,12 @@ class LocalStatus {
   final double bufferMs;
   final double underrunMs;
   final BigInt jumps;
+
+  /// Host: this phone's own delay. Guest: the delay the host gave it. ms.
   final double delayMs;
+
+  /// Host: its own delay came from tuning.
+  final bool tuned;
   final double volume;
   final bool enabled;
   final bool playing;
@@ -188,6 +264,7 @@ class LocalStatus {
     required this.underrunMs,
     required this.jumps,
     required this.delayMs,
+    required this.tuned,
     required this.volume,
     required this.enabled,
     required this.playing,
@@ -209,6 +286,7 @@ class LocalStatus {
       underrunMs.hashCode ^
       jumps.hashCode ^
       delayMs.hashCode ^
+      tuned.hashCode ^
       volume.hashCode ^
       enabled.hashCode ^
       playing.hashCode ^
@@ -232,6 +310,7 @@ class LocalStatus {
           underrunMs == other.underrunMs &&
           jumps == other.jumps &&
           delayMs == other.delayMs &&
+          tuned == other.tuned &&
           volume == other.volume &&
           enabled == other.enabled &&
           playing == other.playing &&
@@ -262,7 +341,12 @@ class PeerStatus {
   final double underrunMs;
   final double latencyMs;
   final double errMs;
+
+  /// The delay the host gives this speaker (tuning plus fine adjustment), ms.
   final double delayMs;
+
+  /// Measured by tuning (rather than never tuned).
+  final bool tuned;
   final double volume;
   final String output;
   final bool playing;
@@ -283,6 +367,7 @@ class PeerStatus {
     required this.latencyMs,
     required this.errMs,
     required this.delayMs,
+    required this.tuned,
     required this.volume,
     required this.output,
     required this.playing,
@@ -305,6 +390,7 @@ class PeerStatus {
       latencyMs.hashCode ^
       errMs.hashCode ^
       delayMs.hashCode ^
+      tuned.hashCode ^
       volume.hashCode ^
       output.hashCode ^
       playing.hashCode ^
@@ -329,6 +415,7 @@ class PeerStatus {
           latencyMs == other.latencyMs &&
           errMs == other.errMs &&
           delayMs == other.delayMs &&
+          tuned == other.tuned &&
           volume == other.volume &&
           output == other.output &&
           playing == other.playing &&
@@ -368,4 +455,68 @@ class TicketInfo {
           hasRelay == other.hasRelay &&
           wifiSsid == other.wifiSsid &&
           wifiPassphrase == other.wifiPassphrase;
+}
+
+class TuneReport {
+  final List<TunedDevice> devices;
+
+  /// How far apart the heard devices sounded before tuning (ms).
+  final double spreadBeforeMs;
+
+  const TuneReport({required this.devices, required this.spreadBeforeMs});
+
+  @override
+  int get hashCode => devices.hashCode ^ spreadBeforeMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TuneReport &&
+          runtimeType == other.runtimeType &&
+          devices == other.devices &&
+          spreadBeforeMs == other.spreadBeforeMs;
+}
+
+class TunedDevice {
+  /// Empty for the host phone itself.
+  final String peerId;
+  final String name;
+  final bool heard;
+
+  /// How much later than the host it sounded with equal delays (ms), when heard.
+  final double? lateMs;
+
+  /// Its delay now (ms).
+  final double delayMs;
+  final double spreadMs;
+
+  const TunedDevice({
+    required this.peerId,
+    required this.name,
+    required this.heard,
+    this.lateMs,
+    required this.delayMs,
+    required this.spreadMs,
+  });
+
+  @override
+  int get hashCode =>
+      peerId.hashCode ^
+      name.hashCode ^
+      heard.hashCode ^
+      lateMs.hashCode ^
+      delayMs.hashCode ^
+      spreadMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TunedDevice &&
+          runtimeType == other.runtimeType &&
+          peerId == other.peerId &&
+          name == other.name &&
+          heard == other.heard &&
+          lateMs == other.lateMs &&
+          delayMs == other.delayMs &&
+          spreadMs == other.spreadMs;
 }

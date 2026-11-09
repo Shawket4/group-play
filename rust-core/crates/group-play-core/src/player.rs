@@ -5,6 +5,7 @@ use super::control::Controller;
 use super::ring::PcmRing;
 use super::sync::ClockEstimate;
 use super::timeline::Timeline;
+use super::tune::Gate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, OutputCallbackInfo, SampleFormat, SizedSample, StreamConfig};
 use parking_lot::{Mutex, RwLock};
@@ -20,16 +21,28 @@ pub struct Render {
     pub clock: ClockEstimate,
     /// Bumped when a new stream starts so the controller re-locks.
     pub generation: u64,
+    /// The stream being played, for matching a [`Gate`].
+    pub stream_id: u32,
+    /// Tuning: play only this device's slots of that stream.
+    pub gate: Option<Gate>,
 }
 
 pub struct PlayerShared {
     pub ring: PcmRing,
     pub render: RwLock<Render>,
-    /// User calibration: delay this device by this much (ns), positive = later.
+    /// This device's own extra delay (ns), positive = later. Not used by the app any more (the
+    /// host owns timing); kept for the CLI.
     pub delay_ns: AtomicI64,
+    /// Delay set by the host for this device (tuning or the host's fine adjustment), ns.
+    pub assigned_delay_ns: AtomicI64,
     /// Volume as f32 bits.
     volume_bits: AtomicU32,
     pub enabled: AtomicBool,
+    /// Android: open the output on the physical device (speaker, headphones, Bluetooth) by id
+    /// instead of the default route. While full sharing records the phone's whole output
+    /// (REMOTE_SUBMIX), the default route leads into that recording; an explicitly routed stream
+    /// still reaches the speaker, so the host keeps playing in sync with everyone else.
+    pub explicit_route: AtomicBool,
     // stats, written by the callback
     pub underrun_frames: AtomicU64,
     pub played_frames: AtomicU64,
@@ -47,10 +60,12 @@ impl PlayerShared {
     pub fn new(ring: PcmRing) -> Arc<Self> {
         Arc::new(Self {
             ring,
-            render: RwLock::new(Render { timeline: None, clock: ClockEstimate::identity(), generation: 0 }),
+            render: RwLock::new(Render { timeline: None, clock: ClockEstimate::identity(), generation: 0, stream_id: 0, gate: None }),
             delay_ns: AtomicI64::new(0),
+            assigned_delay_ns: AtomicI64::new(0),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             enabled: AtomicBool::new(true),
+            explicit_route: AtomicBool::new(false),
             underrun_frames: AtomicU64::new(0),
             played_frames: AtomicU64::new(0),
             latency_ns: AtomicI64::new(0),
@@ -73,6 +88,16 @@ impl PlayerShared {
     pub fn set_clock(&self, clock: ClockEstimate) {
         self.render.write().clock = clock;
     }
+    /// Total delay this device applies, ns.
+    pub fn total_delay_ns(&self) -> i64 {
+        self.delay_ns.load(Ordering::Relaxed) + self.assigned_delay_ns.load(Ordering::Relaxed)
+    }
+    pub fn set_stream_id(&self, id: u32) {
+        self.render.write().stream_id = id;
+    }
+    pub fn set_gate(&self, gate: Option<Gate>) {
+        self.render.write().gate = gate;
+    }
     pub fn set_timeline(&self, tl: Option<Timeline>, new_stream: bool) {
         let mut r = self.render.write();
         r.timeline = tl;
@@ -91,11 +116,13 @@ pub struct Renderer {
     channels: usize,
     /// Last gain actually applied, for click-free volume/mute changes.
     gain: f32,
+    /// Delay used by the last callback: a change is applied at once (a jump), not slewed.
+    last_delay: f64,
 }
 
 impl Renderer {
     pub fn new(shared: Arc<PlayerShared>, out_rate: f64, channels: usize) -> Self {
-        Self { shared, ctl: Controller::new(), generation: u64::MAX, out_rate, channels, gain: 0.0 }
+        Self { shared, ctl: Controller::new(), generation: u64::MAX, out_rate, channels, gain: 0.0, last_delay: 0.0 }
     }
 
     /// Fills `out` (interleaved, `self.channels` per frame) for frames whose first one is heard
@@ -116,7 +143,13 @@ impl Renderer {
             self.generation = render.generation;
             self.ctl.reset();
         }
-        let delay = self.shared.delay_ns.load(Ordering::Relaxed) as f64;
+        let delay = self.shared.total_delay_ns() as f64;
+        if (delay - self.last_delay).abs() > 100_000.0 {
+            // Slewing at 0.2 % would take 10 s for 20 ms; a timing change should be heard now.
+            self.ctl.reset();
+        }
+        self.last_delay = delay;
+        let gate = render.gate.filter(|g| g.stream_id == render.stream_id);
         let plan = self.ctl.plan(p0, n, self.out_rate, &render.clock, &tl, delay);
         if plan.jumped {
             self.shared.jumps.fetch_add(1, Ordering::Relaxed);
@@ -132,6 +165,7 @@ impl Renderer {
             for i in 0..n {
                 self.gain += gain_step;
                 let frame = match rd.sample_at(pos) {
+                    Some(_) if gate.is_some_and(|g| !g.audible(pos)) => [0.0, 0.0],
                     Some(s) => s,
                     None => {
                         missing += 1;
@@ -196,9 +230,32 @@ impl Drop for Player {
     }
 }
 
+/// iOS: AVAudioSession.outputLatency, refreshed by the output thread (not read in the callback).
+///
+/// cpal puts `playback` at the render timestamp + IO buffer + output latency. The render
+/// timestamp (`mHostTime`) already marks when the buffer starts going out, so that counts the
+/// IO buffer twice and the phone plays early by it (5–23 ms). Ableton Link's iOS reference does
+/// `mHostTime + outputLatency`, and so do we.
+#[cfg(target_os = "ios")]
+static IOS_OUTPUT_LATENCY_NS: AtomicI64 = AtomicI64::new(-1);
+
+#[cfg(target_os = "ios")]
+fn refresh_ios_latency() {
+    // SAFETY: AVAudioSession's shared instance and its latency getter are safe to call from any thread.
+    let secs = unsafe { objc2_avf_audio::AVAudioSession::sharedInstance().outputLatency() };
+    if secs.is_finite() && (0.0..1.0).contains(&secs) {
+        IOS_OUTPUT_LATENCY_NS.store((secs * 1e9) as i64, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+fn refresh_ios_latency() {}
+
 fn output_thread(shared: Arc<PlayerShared>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
+        refresh_ios_latency();
         let failed = Arc::new(AtomicBool::new(false));
+        let route = shared.explicit_route.load(Ordering::Relaxed);
         match build_stream(shared.clone(), failed.clone()) {
             Ok(stream) => {
                 *shared.error.lock() = None;
@@ -208,10 +265,15 @@ fn output_thread(shared: Arc<PlayerShared>, stop: Arc<AtomicBool>) {
                 }
                 while !stop.load(Ordering::Relaxed) && !failed.load(Ordering::Relaxed) {
                     thread::sleep(Duration::from_millis(50));
+                    refresh_ios_latency();
                     // A stream whose callback stopped for 2 s (device lost without an error) is rebuilt too.
                     let last = shared.last_callback_ns.load(Ordering::Relaxed);
                     if last != 0 && now_ns() - last > 2_000_000_000 {
                         log::warn!("output: callbacks stopped, rebuilding stream");
+                        break;
+                    }
+                    if shared.explicit_route.load(Ordering::Relaxed) != route {
+                        log::info!("output: routing changed, rebuilding stream");
                         break;
                     }
                 }
@@ -231,7 +293,11 @@ fn output_thread(shared: Arc<PlayerShared>, stop: Arc<AtomicBool>) {
 
 fn build_stream(shared: Arc<PlayerShared>, failed: Arc<AtomicBool>) -> anyhow::Result<cpal::Stream> {
     let host = cpal::default_host();
-    let device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("no output device"))?;
+    let explicit = if shared.explicit_route.load(Ordering::Relaxed) { physical_output(&host) } else { None };
+    let device = match explicit {
+        Some(d) => d,
+        None => host.default_output_device().ok_or_else(|| anyhow::anyhow!("no output device"))?,
+    };
     let supported = device.default_output_config()?;
     let format = supported.sample_format();
     let mut config: StreamConfig = supported.into();
@@ -249,6 +315,38 @@ fn build_stream(shared: Arc<PlayerShared>, failed: Arc<AtomicBool>) -> anyhow::R
         SampleFormat::U16 => run::<u16>(&device, config, shared, failed),
         other => anyhow::bail!("unsupported output sample format {other:?}"),
     }
+}
+
+/// The physical output Android would pick by itself: Bluetooth media, else wired/USB, else the
+/// built-in speaker.
+#[cfg(target_os = "android")]
+fn physical_output(host: &cpal::Host) -> Option<cpal::Device> {
+    use cpal::{DeviceType, InterfaceType};
+    let devices: Vec<(cpal::Device, DeviceType, InterfaceType)> = host
+        .output_devices()
+        .ok()?
+        .filter_map(|d| {
+            let desc = d.description().ok()?;
+            Some((d, desc.device_type(), desc.interface_type()))
+        })
+        .collect();
+    let rank = |t: DeviceType, i: InterfaceType| match (t, i) {
+        (DeviceType::Headset, InterfaceType::Bluetooth) => None, // SCO: call audio
+        (_, InterfaceType::Bluetooth) => Some(0),
+        (DeviceType::Headphones | DeviceType::Headset, _) => Some(1),
+        (DeviceType::Speaker, InterfaceType::BuiltIn) => Some(2),
+        _ => None,
+    };
+    let best = devices.into_iter().filter_map(|(d, t, i)| rank(t, i).map(|r| (r, d))).min_by_key(|(r, _)| *r);
+    if let Some((_, d)) = &best {
+        log::info!("output: routing explicitly to {}", d.description().map(|x| x.name().to_string()).unwrap_or_default());
+    }
+    best.map(|(_, d)| d)
+}
+
+#[cfg(not(target_os = "android"))]
+fn physical_output(_host: &cpal::Host) -> Option<cpal::Device> {
+    None
 }
 
 fn run<T>(device: &cpal::Device, config: StreamConfig, shared: Arc<PlayerShared>, failed: Arc<AtomicBool>) -> anyhow::Result<cpal::Stream>
@@ -271,6 +369,14 @@ where
                 // trust the hardware timestamp if it is in our clock domain (sanity: within 1 s)
                 if (direct - now).abs() < 1_000_000_000 {
                     p0 = direct;
+                }
+                #[cfg(target_os = "ios")]
+                {
+                    let out_lat = IOS_OUTPUT_LATENCY_NS.load(Ordering::Relaxed);
+                    let host_time = ts.callback.as_nanos() as i64;
+                    if out_lat >= 0 && (host_time - now).abs() < 1_000_000_000 {
+                        p0 = host_time + out_lat;
+                    }
                 }
             }
             cb_shared.latency_ns.store(p0 - now, Ordering::Relaxed);

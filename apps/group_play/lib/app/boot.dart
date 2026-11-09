@@ -9,7 +9,8 @@ Future<List<Override>> boot() async {
   final prefs = await SharedPreferences.getInstance();
   final name = await DeviceSettings.defaultName(prefs);
   configure(deviceName: name, platform: platformName);
-  await setDelayMs(ms: prefs.getDouble('delayMs') ?? 0);
+  // a fixed identity: this phone keeps its id, so remembered sessions find each other again
+  setIdentity(key: await SessionMemory.identityKey(prefs));
   await setVolume(volume: prefs.getDouble('volume') ?? 1);
   if (IosNative.available) {
     try {

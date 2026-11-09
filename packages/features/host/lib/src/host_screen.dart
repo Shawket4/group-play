@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:app_core/app_core.dart';
 import 'package:design_system/design_system.dart';
 import 'package:feature_host/src/invite_sheet.dart';
+import 'package:feature_host/src/tune_card.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -35,7 +36,10 @@ class HostScreen extends ConsumerWidget {
     final status = ref.watch(engineStatusProvider).value;
     final session = ref.watch(sessionProvider);
     if (status == null || status.role != 'host') {
-      return const CupertinoPageScaffold(backgroundColor: GPColors.background, child: Center(child: CupertinoActivityIndicator()));
+      return const CupertinoPageScaffold(
+        backgroundColor: GPColors.background,
+        child: Center(child: CupertinoActivityIndicator()),
+      );
     }
     final connected = status.peers.where((p) => p.connected).length;
     return GPPage(
@@ -43,10 +47,17 @@ class HostScreen extends ConsumerWidget {
       previousPageTitle: 'Home',
       trailing: GPBarButton('End', destructive: true, onPressed: () => _end(context, ref)),
       slivers: [
-        GPBlock(child: _NowPlaying(status: status, session: session, speakers: connected)),
-        GPBlock(child: _Speakers(status: status, capturing: session.capturing)),
+        GPBlock(
+          child: _NowPlaying(status: status, session: session, speakers: connected),
+        ),
+        GPBlock(
+          child: _Speakers(status: status, source: session.source),
+        ),
+        if (connected > 0) GPBlock(child: TuneCard(status: status)),
         if (status.peers.isEmpty) GPBlock(child: _InviteInline(ticket: status.ticket ?? '')),
-        GPBlock(child: _Sources(session: session, playing: status.source != null)),
+        GPBlock(
+          child: _Sources(session: session, playing: status.source != null),
+        ),
         if (session.capturing) GPBlock(child: _Buffer(ms: session.playoutDelayMs)),
         if (AndroidNative.available) _Network(hotspot: session.hotspot, busy: session.pending == SessionAction.hotspot),
       ],
@@ -107,7 +118,12 @@ class _NowPlaying extends ConsumerWidget {
               children: [
                 Text('NOW PLAYING', style: GPText.label.copyWith(color: onInk.withValues(alpha: 0.6))),
                 const SizedBox(height: GPSpace.xs),
-                Text(source, maxLines: 2, overflow: TextOverflow.ellipsis, style: GPText.title3.copyWith(color: onInk)),
+                Text(
+                  source,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: GPText.title3.copyWith(color: onInk),
+                ),
                 const SizedBox(height: GPSpace.xxs),
                 Text(
                   '$kind · ${speakers == 0 ? 'no speakers yet' : 'on $speakers ${speakers == 1 ? 'speaker' : 'speakers'}'}',
@@ -132,10 +148,10 @@ class _NowPlaying extends ConsumerWidget {
 
 /// Who is listening: this phone, every speaker, and the invite button.
 class _Speakers extends ConsumerWidget {
-  const _Speakers({required this.status, required this.capturing});
+  const _Speakers({required this.status, required this.source});
 
   final EngineStatus status;
-  final bool capturing;
+  final SourceKind source;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -160,8 +176,8 @@ class _Speakers extends ConsumerWidget {
             children: [
               GPAvatar(
                 name: name,
-                caption: capturing ? 'Source' : (local.enabled ? 'This phone' : 'Silent'),
-                tone: capturing || !local.enabled ? GPTone.neutral : GPTone.good,
+                caption: source == SourceKind.captureBasic ? 'Source' : (local.enabled ? 'This phone' : 'Silent'),
+                tone: source == SourceKind.captureBasic || !local.enabled ? GPTone.neutral : GPTone.good,
                 onTap: () => context.push(Routes.hostSpeaker(Routes.localSpeakerId)),
               ),
               for (final p in status.peers)
@@ -172,11 +188,7 @@ class _Speakers extends ConsumerWidget {
                   dimmed: !p.connected,
                   onTap: () => context.push(Routes.hostSpeaker(p.id)),
                 ),
-              GPAvatar(
-                name: 'Invite',
-                icon: CupertinoIcons.add,
-                onTap: () => showInviteSheet(context),
-              ),
+              GPAvatar(name: 'Invite', icon: CupertinoIcons.add, onTap: () => showInviteSheet(context)),
             ],
           ),
         ),

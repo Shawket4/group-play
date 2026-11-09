@@ -9,6 +9,7 @@ use super::source::{FdReader, PullSource};
 use super::sync::ClockEstimate;
 use super::ticket::{Ticket, WifiCreds};
 use super::timeline::Timeline;
+use super::tune::{self, Plan, Recording, TuneSource};
 use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 use iroh::Endpoint;
@@ -42,6 +43,14 @@ struct StreamInfo {
     desc: String,
 }
 
+/// Timing the host keeps for a guest (by its endpoint id, stable when the guest keeps its identity).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Timing {
+    pub delay_ms: f64,
+    /// Set by tuning (as opposed to never measured).
+    pub tuned: bool,
+}
+
 pub struct PeerInfo {
     pub id: String,
     pub name: String,
@@ -51,7 +60,12 @@ pub struct PeerInfo {
     pub path_rtt_ms: f64,
     pub status: Option<GuestStatus>,
     cmd: mpsc::UnboundedSender<HostMsg>,
+    /// Which connection this entry belongs to. A guest that reconnects keeps its id (a stable
+    /// identity), so the old connection's cleanup must not touch the new one's entry.
+    conn: u64,
 }
+
+static NEXT_CONN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 struct Shared {
     stream: Mutex<Option<StreamInfo>>,
@@ -61,9 +75,37 @@ struct Shared {
     local: Arc<PlayerShared>,
     next_stream_id: AtomicU32,
     host_name: String,
+    endpoint: Endpoint,
+    wifi: Mutex<Option<WifiCreds>>,
+    timings: Mutex<HashMap<String, Timing>>,
+    /// Whether the host's own delay came from tuning.
+    self_tuned: AtomicBool,
+    tuning: AtomicBool,
 }
 
 impl Shared {
+    fn ticket(&self) -> Ticket {
+        net::ticket_for(&self.endpoint, &self.host_name, self.wifi.lock().clone())
+    }
+
+    fn send_to(&self, peer: &str, msg: HostMsg) {
+        if let Some(p) = self.peers.lock().get(peer) {
+            let _ = p.cmd.send(msg);
+        }
+    }
+
+    fn set_peer_delay(&self, peer: &str, ms: f64, tuned: Option<bool>) {
+        {
+            let mut t = self.timings.lock();
+            let e = t.entry(peer.to_string()).or_default();
+            e.delay_ms = ms;
+            if let Some(tuned) = tuned {
+                e.tuned = tuned;
+            }
+        }
+        self.send_to(peer, HostMsg::SetDelay { delay_ms: ms });
+    }
+
     fn publish(&self, msg: &Media, end_frame: u64) {
         let bytes = match proto::frame(msg) {
             Ok(b) => Arc::new(b),
@@ -99,6 +141,7 @@ impl Shared {
         self.recent.lock().clear();
         *self.stream.lock() = Some(StreamInfo { id, sample_rate, timeline, desc: desc.clone() });
         self.local.ring.clear();
+        self.local.set_stream_id(id);
         self.local.set_timeline(Some(timeline), true);
         self.publish(&Media::StreamStart { id, sample_rate, timeline, desc }, 0);
         id
@@ -187,7 +230,6 @@ pub struct Host {
     _player: Option<Player>,
     source: Mutex<Option<SourceHandle>>,
     accept: tokio::task::JoinHandle<()>,
-    wifi: Mutex<Option<WifiCreds>>,
     playout_delay_ns: Mutex<i64>,
 }
 
@@ -206,11 +248,34 @@ pub struct PeerSnapshot {
     pub path: String,
     pub path_rtt_ms: f64,
     pub status: Option<GuestStatus>,
+    pub timing: Timing,
+}
+
+/// One device's tuning outcome. `id` is empty for the host itself.
+#[derive(Clone, Debug)]
+pub struct TunedDevice {
+    pub id: String,
+    pub name: String,
+    pub heard: bool,
+    /// Lateness relative to the host with equal delays (ms), when heard.
+    pub late_ms: Option<f64>,
+    /// The delay it has now (ms).
+    pub delay_ms: f64,
+    pub spread_ms: f64,
+    pub snr: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TuneReport {
+    pub devices: Vec<TunedDevice>,
+    /// Largest disagreement between the devices after tuning would be 0; this is how far apart
+    /// they were before (max minus min sounding time, ms), for the "was 23 ms apart" line.
+    pub spread_before_ms: f64,
 }
 
 impl Host {
-    pub async fn start(host_name: String, local_playback: bool) -> Result<Host> {
-        let endpoint = net::make_endpoint(true).await?;
+    pub async fn start(host_name: String, local_playback: bool, identity: Option<[u8; 32]>) -> Result<Host> {
+        let endpoint = net::make_endpoint(true, identity).await?;
         let ring = PcmRing::new(48_000 * 12);
         let local = PlayerShared::new(ring);
         local.set_clock(ClockEstimate::identity());
@@ -224,6 +289,11 @@ impl Host {
             local: local.clone(),
             next_stream_id: AtomicU32::new(1),
             host_name,
+            endpoint: endpoint.clone(),
+            wifi: Mutex::new(None),
+            timings: Mutex::new(HashMap::new()),
+            self_tuned: AtomicBool::new(false),
+            tuning: AtomicBool::new(false),
         });
         let player = Some(Player::start(local));
         let accept = tokio::spawn(accept_loop(endpoint.clone(), shared.clone()));
@@ -234,17 +304,44 @@ impl Host {
             _player: player,
             source: Mutex::new(None),
             accept,
-            wifi: Mutex::new(None),
             playout_delay_ns: Mutex::new(300_000_000),
         })
     }
 
     pub fn ticket(&self) -> Ticket {
-        net::ticket_for(&self.endpoint, &self.shared.host_name, self.wifi.lock().clone())
+        self.shared.ticket()
     }
 
     pub fn set_wifi(&self, wifi: Option<WifiCreds>) {
-        *self.wifi.lock() = wifi;
+        *self.shared.wifi.lock() = wifi;
+    }
+
+    /// Timings remembered from earlier sessions (by guest id), applied when those guests join.
+    pub fn set_known_timings(&self, known: Vec<(String, Timing)>) {
+        let mut t = self.shared.timings.lock();
+        for (id, timing) in known {
+            t.insert(id, timing);
+        }
+    }
+
+    /// The host phone's own delay (ms).
+    pub fn set_self_delay(&self, ms: f64, tuned: Option<bool>) {
+        self.shared.local.assigned_delay_ns.store((ms * 1e6) as i64, Ordering::Relaxed);
+        if let Some(t) = tuned {
+            self.shared.self_tuned.store(t, Ordering::Relaxed);
+        }
+    }
+
+    pub fn self_delay_ms(&self) -> f64 {
+        self.shared.local.assigned_delay_ns.load(Ordering::Relaxed) as f64 / 1e6
+    }
+
+    pub fn self_tuned(&self) -> bool {
+        self.shared.self_tuned.load(Ordering::Relaxed)
+    }
+
+    pub fn is_tuning(&self) -> bool {
+        self.shared.tuning.load(Ordering::Relaxed)
     }
 
     pub fn local(&self) -> &Arc<PlayerShared> {
@@ -294,10 +391,9 @@ impl Host {
         Ok(())
     }
 
+    /// The host's fine adjustment for one guest (ms, positive = later).
     pub fn set_peer_delay(&self, peer: &str, ms: f64) {
-        if let Some(p) = self.shared.peers.lock().get(peer) {
-            let _ = p.cmd.send(HostMsg::SetDelay { delay_ms: ms });
-        }
+        self.shared.set_peer_delay(peer, ms, None);
     }
 
     pub fn set_peer_volume(&self, peer: &str, v: f64) {
@@ -314,6 +410,7 @@ impl Host {
             .lock()
             .values()
             .map(|p| PeerSnapshot {
+                timing: self.shared.timings.lock().get(&p.id).copied().unwrap_or_default(),
                 id: p.id.clone(),
                 name: p.name.clone(),
                 platform: p.platform.clone(),
@@ -331,14 +428,181 @@ impl Host {
         }
     }
 
+    /// Starts tuning: plays the calibration stream with every connected device in its own slot,
+    /// while `mic_fd` (s16le from this phone's microphone) records. Returns at once; run the
+    /// returned job (about 6 s, blocking) to measure and apply the new delays.
+    pub fn tune_start(&self, mic_fd: i32, mic_rate: u32, mic_channels: u32) -> Result<TuneJob> {
+        let reader = FdReader::from_fd(mic_fd, mic_channels as usize)?;
+        anyhow::ensure!(mic_rate >= 8_000, "microphone rate {mic_rate} Hz is too low");
+        let mut peers: Vec<(String, String)> =
+            self.shared.peers.lock().values().filter(|p| p.connected).map(|p| (p.id.clone(), p.name.clone())).collect();
+        anyhow::ensure!(!peers.is_empty(), "No speakers are connected yet");
+        anyhow::ensure!(!self.shared.tuning.swap(true, Ordering::SeqCst), "Already tuning");
+        peers.sort();
+        let plan = Plan::new(1 + peers.len() as u32);
+        let recording = Arc::new(Mutex::new(Recording { samples: Vec::new(), rate: mic_rate as f64, anchor_ns: i64::MAX }));
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let recording = recording.clone();
+            let stop = stop.clone();
+            thread::Builder::new().name("gp-tune-mic".into()).spawn(move || record(reader, mic_rate, &recording, &stop))?;
+        }
+        let was_enabled = self.shared.local.enabled.swap(true, Ordering::Relaxed);
+        if let Err(e) = self.play_pull(Box::new(TuneSource::new(plan))) {
+            self.shared.local.enabled.store(was_enabled, Ordering::Relaxed);
+            self.shared.tuning.store(false, Ordering::SeqCst);
+            stop.store(true, Ordering::Relaxed);
+            return Err(e);
+        }
+        Ok(TuneJob { shared: self.shared.clone(), plan, peers, recording, stop, was_enabled })
+    }
+
     pub async fn shutdown(self) {
+        // stop taking connections first, or a guest told "host ended" rejoins in the gap
+        self.accept.abort();
         self.stop_source();
         for p in self.shared.peers.lock().values() {
-            let _ = p.cmd.send(HostMsg::Kick { reason: "host ended the session".into() });
+            let _ = p.cmd.send(HostMsg::Kick { reason: "host ended the session".into(), resumable: true });
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
         self.accept.abort();
         self.endpoint.close().await;
+    }
+}
+
+/// A tuning run in progress. [`TuneJob::run`] blocks until the chirps are done.
+pub struct TuneJob {
+    shared: Arc<Shared>,
+    plan: Plan,
+    peers: Vec<(String, String)>,
+    recording: Arc<Mutex<Recording>>,
+    stop: Arc<AtomicBool>,
+    was_enabled: bool,
+}
+
+impl TuneJob {
+    pub fn seconds(&self) -> f64 {
+        self.plan.seconds() + 1.3
+    }
+
+    pub fn run(self) -> Result<TuneReport> {
+        let res = self.measure();
+        // always: everyone plays everything again, the host's own playback is as it was
+        self.shared.local.set_gate(None);
+        for (id, _) in &self.peers {
+            self.shared.send_to(id, HostMsg::Gate { gate: None });
+        }
+        self.shared.local.enabled.store(self.was_enabled, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Relaxed);
+        self.shared.tuning.store(false, Ordering::SeqCst);
+        res
+    }
+
+    fn measure(&self) -> Result<TuneReport> {
+        let shared = &self.shared;
+        // the calibration stream starts on the source thread
+        let deadline = now_ns() + 3_000_000_000;
+        let (id, tl) = loop {
+            if let Some(s) = shared.stream.lock().as_ref().filter(|s| s.desc == "Tuning") {
+                break (s.id, s.timeline);
+            }
+            anyhow::ensure!(now_ns() < deadline, "tuning stream did not start");
+            thread::sleep(Duration::from_millis(5));
+        };
+        shared.local.set_gate(Some(self.plan.gate(id, 0)));
+        for (i, (peer, _)) in self.peers.iter().enumerate() {
+            shared.send_to(peer, HostMsg::Gate { gate: Some(self.plan.gate(id, i as u32 + 1)) });
+        }
+        let current: Vec<f64> = std::iter::once(shared.local.assigned_delay_ns.load(Ordering::Relaxed) as f64 / 1e6)
+            .chain(self.peers.iter().map(|(p, _)| shared.timings.lock().get(p).map(|t| t.delay_ms).unwrap_or(0.0)))
+            .collect();
+        let expected: Vec<Vec<f64>> = (0..self.plan.rounds)
+            .map(|r| (0..self.plan.slots).map(|k| tl.host_ns_at(self.plan.frame_of(r, k) as f64) + current[k as usize] * 1e6).collect())
+            .collect();
+        let max_delay_ns = current.iter().copied().fold(0.0, f64::max) * 1e6;
+        let end = tl.host_ns_at(self.plan.total_frames() as f64) + max_delay_ns + 600e6;
+        while (now_ns() as f64) < end {
+            if shared.stream.lock().as_ref().is_some_and(|s| s.id != id) {
+                anyhow::bail!("tuning was interrupted (another source started)");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        self.stop.store(true, Ordering::Relaxed);
+        let rec = std::mem::replace(&mut *self.recording.lock(), Recording { samples: Vec::new(), rate: 0.0, anchor_ns: 0 });
+        anyhow::ensure!(rec.samples.len() as f64 > rec.rate * 2.0, "the microphone gave no audio");
+        let peak = rec.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        log::info!("tune: {:.1} s of mic audio at {} Hz, peak {:.3}", rec.samples.len() as f64 / rec.rate, rec.rate, peak);
+        let results = tune::analyze(&rec, &self.plan, &expected);
+        for r in &results {
+            log::info!("tune: slot {} heard {}/{} late {:?} ms spread {:.2} ms snr {:.0}", r.slot, r.heard, self.plan.rounds, r.late_ms, r.spread_ms, r.snr);
+        }
+        anyhow::ensure!(
+            results[0].late_ms.is_some(),
+            "This phone could not hear itself. Check that the microphone is not covered and the volume is up."
+        );
+        let late: Vec<Option<f64>> = results.iter().map(|r| r.late_ms).collect();
+        let delays = tune::new_delays(&current, &late);
+        // apply
+        shared.local.assigned_delay_ns.store((delays[0] * 1e6) as i64, Ordering::Relaxed);
+        shared.self_tuned.store(true, Ordering::Relaxed);
+        for (i, (peer, _)) in self.peers.iter().enumerate() {
+            let heard = late[i + 1].is_some();
+            shared.set_peer_delay(peer, delays[i + 1], heard.then_some(true));
+        }
+        let sounding: Vec<f64> = late.iter().zip(&current).filter_map(|(l, d)| l.map(|l| l + d - current[0])).collect();
+        let spread_before_ms = if sounding.len() >= 2 {
+            sounding.iter().copied().fold(f64::MIN, f64::max) - sounding.iter().copied().fold(f64::MAX, f64::min)
+        } else {
+            0.0
+        };
+        let mut devices = vec![TunedDevice {
+            id: String::new(),
+            name: shared.host_name.clone(),
+            heard: true,
+            late_ms: Some(0.0),
+            delay_ms: delays[0],
+            spread_ms: 0.0,
+            snr: results[0].snr,
+        }];
+        for (i, (peer, name)) in self.peers.iter().enumerate() {
+            let r = &results[i + 1];
+            devices.push(TunedDevice {
+                id: peer.clone(),
+                name: name.clone(),
+                heard: r.late_ms.is_some(),
+                late_ms: r.late_ms,
+                delay_ms: delays[i + 1],
+                spread_ms: r.spread_ms,
+                snr: r.snr,
+            });
+        }
+        Ok(TuneReport { devices, spread_before_ms })
+    }
+}
+
+/// Reads the microphone pipe into `out` until `stop`, EOF or 60 s. The anchor (host time of
+/// sample 0) is the earliest "arrival minus duration so far" over all reads.
+fn record(mut reader: FdReader, rate: u32, out: &Mutex<Recording>, stop: &AtomicBool) {
+    let chunk = (rate / 100).max(1) as usize;
+    let mut pcm = Vec::with_capacity(chunk * 2);
+    let max = rate as usize * 60;
+    let mut total = 0usize;
+    while !stop.load(Ordering::Relaxed) && total < max {
+        pcm.clear();
+        match reader.read_frames(&mut pcm, chunk) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("tune: mic read: {e}");
+                break;
+            }
+        }
+        let now = now_ns();
+        let mut rec = out.lock();
+        rec.samples.extend(pcm.chunks_exact(2).map(|f| (f[0] as f32 + f[1] as f32) * 0.5 / 32768.0));
+        total = rec.samples.len();
+        let a = now - (total as f64 / rate as f64 * 1e9) as i64;
+        rec.anchor_ns = rec.anchor_ns.min(a);
     }
 }
 
@@ -460,15 +724,35 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) -> Result<()> {
     let hello: GuestMsg = proto::read_msg(&mut ctl_recv).await?.context("guest closed before hello")?;
     let GuestMsg::Hello { name, platform, version } = hello else { anyhow::bail!("expected hello") };
     if version != PROTOCOL_VERSION {
-        proto::write_msg(&mut ctl_send, &HostMsg::Kick { reason: format!("version mismatch: host {PROTOCOL_VERSION}, guest {version}") }).await?;
+        let reason = format!("This phone and the host run different versions of Group Play (host {PROTOCOL_VERSION}, this phone {version}). Update both.");
+        proto::write_msg(&mut ctl_send, &HostMsg::Kick { reason, resumable: false }).await?;
         anyhow::bail!("guest {name} speaks protocol {version}");
     }
-    proto::write_msg(&mut ctl_send, &HostMsg::Welcome { host_name: shared.host_name.clone(), version: PROTOCOL_VERSION }).await?;
+    proto::write_msg(&mut ctl_send, &HostMsg::Welcome { host_name: shared.host_name.clone(), version: PROTOCOL_VERSION, ticket: shared.ticket().encode() })
+        .await?;
+    // its timing from before (tuned or adjusted): same id, same phone
+    let known = shared.timings.lock().get(&peer_id).copied();
+    if let Some(t) = known {
+        proto::write_msg(&mut ctl_send, &HostMsg::SetDelay { delay_ms: t.delay_ms }).await?;
+    } else {
+        proto::write_msg(&mut ctl_send, &HostMsg::SetDelay { delay_ms: 0.0 }).await?;
+    }
     log::info!("host: {name} ({platform}) joined");
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<HostMsg>();
+    let conn_no = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     shared.peers.lock().insert(
         peer_id.clone(),
-        PeerInfo { id: peer_id.clone(), name: name.clone(), platform, connected: true, path: net::path_kind(&conn), path_rtt_ms: net::path_rtt_ms(&conn), status: None, cmd: cmd_tx },
+        PeerInfo {
+            id: peer_id.clone(),
+            name: name.clone(),
+            platform,
+            connected: true,
+            path: net::path_kind(&conn),
+            path_rtt_ms: net::path_rtt_ms(&conn),
+            status: None,
+            cmd: cmd_tx,
+            conn: conn_no,
+        },
     );
 
     // media pump
@@ -529,7 +813,7 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) -> Result<()> {
         loop {
             match proto::read_msg::<GuestMsg>(&mut ctl_recv).await? {
                 Some(GuestMsg::Status(st)) => {
-                    if let Some(p) = shared.peers.lock().get_mut(&peer_id) {
+                    if let Some(p) = shared.peers.lock().get_mut(&peer_id).filter(|p| p.conn == conn_no) {
                         p.status = Some(st);
                         p.path = net::path_kind(&conn);
                         p.path_rtt_ms = net::path_rtt_ms(&conn);
@@ -542,7 +826,7 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) -> Result<()> {
     }
     .await;
     log::info!("host: {name} disconnected");
-    if let Some(p) = shared.peers.lock().get_mut(&peer_id) {
+    if let Some(p) = shared.peers.lock().get_mut(&peer_id).filter(|p| p.conn == conn_no) {
         p.connected = false;
     }
     media.abort();

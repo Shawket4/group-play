@@ -10,3 +10,4 @@ export 'src/platform/android_native.dart';
 export 'src/platform/ios_native.dart';
 export 'src/routes.dart';
 export 'src/session.dart';
+export 'src/session_memory.dart';

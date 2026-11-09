@@ -7,11 +7,12 @@
 //! - datagrams: `Dgram` ping/pong for clock sync (unreliable on purpose: a late answer is useless).
 
 use super::timeline::Timeline;
+use super::tune::Gate;
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const ALPN: &[u8] = b"group-play/1";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 const MAX_FRAME: usize = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -39,11 +40,16 @@ pub enum GuestMsg {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HostMsg {
-    Welcome { host_name: String, version: u32 },
-    /// The host's calibration slider for this guest.
+    /// `ticket`: the host's current ticket, so the guest can find it again next time.
+    Welcome { host_name: String, version: u32, ticket: String },
+    /// The delay the host assigns this guest (tuning or the host's fine adjustment).
     SetDelay { delay_ms: f64 },
     SetVolume { volume: f64 },
-    Kick { reason: String },
+    /// Tuning: play only these slots of that stream (None = play everything again).
+    Gate { gate: Option<Gate> },
+    /// `resumable`: the host is going away for now (ended the session, app closed); a guest
+    /// that remembers it keeps waiting and rejoins when it is back.
+    Kick { reason: String, resumable: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

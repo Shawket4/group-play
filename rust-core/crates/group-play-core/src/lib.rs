@@ -13,6 +13,7 @@ pub mod source;
 pub mod sync;
 pub mod ticket;
 pub mod timeline;
+pub mod tune;
 
 use parking_lot::Mutex;
 use std::sync::OnceLock;
@@ -33,6 +34,9 @@ pub struct Engine {
     pub volume: Mutex<f64>,
     pub host_local_playback: Mutex<bool>,
     pub last_error: Mutex<Option<String>>,
+    /// This device's iroh secret key, kept by the app so its id (and the host's ticket) stays
+    /// the same across launches. None = a fresh key per session.
+    pub identity: Mutex<Option<[u8; 32]>>,
 }
 
 static ENGINE: OnceLock<Engine> = OnceLock::new();
@@ -55,6 +59,7 @@ pub fn engine() -> &'static Engine {
             volume: Mutex::new(1.0),
             host_local_playback: Mutex::new(true),
             last_error: Mutex::new(None),
+            identity: Mutex::new(None),
         }
     })
 }

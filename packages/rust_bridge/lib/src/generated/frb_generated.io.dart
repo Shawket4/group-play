@@ -39,6 +39,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw);
+
+  @protected
+  double dco_decode_box_autoadd_f_64(dynamic raw);
+
+  @protected
   EngineStatus dco_decode_engine_status(dynamic raw);
 
   @protected
@@ -48,13 +54,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  KnownTiming dco_decode_known_timing(dynamic raw);
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<KnownTiming> dco_decode_list_known_timing(dynamic raw);
 
   @protected
   List<PeerStatus> dco_decode_list_peer_status(dynamic raw);
 
   @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<TunedDevice> dco_decode_list_tuned_device(dynamic raw);
 
   @protected
   LocalStatus dco_decode_local_status(dynamic raw);
@@ -63,10 +81,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
+
+  @protected
+  double? dco_decode_opt_box_autoadd_f_64(dynamic raw);
+
+  @protected
   PeerStatus dco_decode_peer_status(dynamic raw);
 
   @protected
   TicketInfo dco_decode_ticket_info(dynamic raw);
+
+  @protected
+  TuneReport dco_decode_tune_report(dynamic raw);
+
+  @protected
+  TunedDevice dco_decode_tuned_device(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -100,6 +130,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_box_autoadd_f_64(SseDeserializer deserializer);
+
+  @protected
   EngineStatus sse_decode_engine_status(SseDeserializer deserializer);
 
   @protected
@@ -109,13 +145,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  KnownTiming sse_decode_known_timing(SseDeserializer deserializer);
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<KnownTiming> sse_decode_list_known_timing(SseDeserializer deserializer);
 
   @protected
   List<PeerStatus> sse_decode_list_peer_status(SseDeserializer deserializer);
 
   @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<TunedDevice> sse_decode_list_tuned_device(SseDeserializer deserializer);
 
   @protected
   LocalStatus sse_decode_local_status(SseDeserializer deserializer);
@@ -124,10 +172,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer);
+
+  @protected
   PeerStatus sse_decode_peer_status(SseDeserializer deserializer);
 
   @protected
   TicketInfo sse_decode_ticket_info(SseDeserializer deserializer);
+
+  @protected
+  TuneReport sse_decode_tune_report(SseDeserializer deserializer);
+
+  @protected
+  TunedDevice sse_decode_tuned_device(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -166,6 +226,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_f_64(double self, SseSerializer serializer);
+
+  @protected
   void sse_encode_engine_status(EngineStatus self, SseSerializer serializer);
 
   @protected
@@ -175,7 +241,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_known_timing(KnownTiming self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_known_timing(
+    List<KnownTiming> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_peer_status(
@@ -184,8 +259,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_tuned_device(
+    List<TunedDevice> self,
     SseSerializer serializer,
   );
 
@@ -196,10 +280,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_f_64(double? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_peer_status(PeerStatus self, SseSerializer serializer);
 
   @protected
   void sse_encode_ticket_info(TicketInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tune_report(TuneReport self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tuned_device(TunedDevice self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

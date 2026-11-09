@@ -34,13 +34,24 @@ exactly `2.13.0` in three places (frb crate, rust_bridge pubspec, `tool/gen-bind
   audio hardware when the next buffer reaches the DAC (AAudio / CoreAudio timestamps), converts
   that to host time, and reads exactly that frame, resampling by a few ppm to follow drift and
   slewing small errors (≤0.2 %, inaudible) instead of skipping.
+- **Tuning (by ear).** Each phone's latency report misses what the hardware adds after it
+  (speaker DSP, codec buffers, Bluetooth), and that differs per model; Samsung's Group Play
+  could skip this because it only ran on Samsung phones with known latencies. *Tune* measures
+  it: every phone chirps in its own slot of a calibration stream while the host's microphone
+  records, the chirp arrivals give each phone's lateness relative to the host (the host's own
+  input latency cancels), and every phone, the host included, gets the delay that lines it up
+  with the latest one. Timing is owned by the host and remembered per phone.
+- **Sessions are remembered.** Every phone keeps one identity key, so a host has the same id and
+  port (47100) every launch and its old join code keeps working. On launch a host starts
+  hosting again and a speaker rejoins its host by itself, waiting for it if it is not up yet.
 - **Transport.** iroh (QUIC, dial by public key). Same Wi-Fi or the host's hotspot → direct UDP;
   different networks → iroh relays (works, but raw PCM is heavy there: see open items).
 - **Sources.** Sync-test clicks, a music file (symphonia: MP3/AAC/FLAC/WAV/OGG), or, on Android,
   the phone's own audio:
   - **Full sharing** — everything the phone plays, Spotify and Chrome included. Shizuku runs a
-    service as the adb shell user that records `REMOTE_SUBMIX` (the scrcpy technique). The phone's
-    speaker goes quiet; the speakers play. Android 12+.
+    service as the adb shell user that records `REMOTE_SUBMIX` (the scrcpy technique). That
+    routes every app's sound into the recording; the host's own synced copy is opened on the
+    speaker (or headphones/Bluetooth) explicitly, so the host keeps playing in step. Android 12+.
   - **Basic sharing** — MediaProjection playback capture; apps can opt out (Spotify, Chrome do).
 
 ## Run it (MacBook)
@@ -67,7 +78,7 @@ Checks:
 
 ```bash
 melos run analyze     # flutter analyze, whole workspace (clean)
-melos run core_test   # Rust engine: 16 unit + 3 end-to-end (real iroh host/guest in one process)
+melos run core_test   # Rust engine: 21 unit + 6 end-to-end (real iroh host/guest in one process)
 cd rust-core && cargo run --release --example cli -- join GPLAY1:...   # headless speaker on a laptop
 ```
 
@@ -75,22 +86,51 @@ cd rust-core && cargo run --release --example cli -- join GPLAY1:...   # headles
 
 1. **Same Wi-Fi, sync test.** Phone A: *Host a Session* → *Sync Test* tile. Phone B: scan A's
    code with the Camera app (opens Group Play straight into the session) or *Join as a
-   Speaker* → scan. Within ~3 s B shows *In sync* and its gauge needle sits on 0. Put the
-   phones side by side: the clicks should sound like one click. If one is consistently
-   early/late (Bluetooth speakers, some DACs), nudge its *Timing* (speaker screen, or host →
-   tap its avatar). Note the value.
-2. **Music file.** Host → *Music File* tile → pick a song.
-3. **Full sharing (Android host).** Host → *Phone Audio* tile → the setup guide (install
+   Speaker* → scan. Within ~3 s B shows *In sync* and its gauge needle sits on 0.
+2. **Tune.** Put the phones side by side, volume up, room quiet. Host → *Tune* (allow the
+   microphone). Five seconds of chirps; the card says how far apart they were. Now the clicks
+   should sound like one click. Logs show `tune: slot N heard 3/3 late … ms`: send those lines
+   if it is still off. Fine adjustment, if ever needed: host → tap a speaker (or this phone) →
+   *Timing* (+ = later). The speaker phone has no timing control any more.
+3. **Remembered session.** Close both apps (swipe away). Open the host app: it hosts again by
+   itself. Open the speaker app: it rejoins by itself (or shows *Waiting for host* until the
+   host is up). Tuned timings come back too. *End Session* / *Leave* forgets it.
+4. **Music file.** Host → *Music File* tile → pick a song.
+5. **Full sharing (Android host).** Host → *Phone Audio* tile → the setup guide (install
    Shizuku, start it over wireless debugging, allow Group Play) → *Start Sharing*. Play
-   Spotify on the host: the host goes quiet, the speakers play it. Then Chrome/YouTube.
-4. **Basic sharing.** Host → *Allowed Apps* tile → accept the screen-capture prompt → play
-   YouTube Music.
-5. **Hotspot.** Host → Network → Hotspot on. Android speakers join from the code; iPhones scan
+   Spotify on the host: the host and the speakers play it together. Tune works while sharing
+   (Spotify pauses for the chirps and resumes). If the host echoes, turn off *Play Along* on its
+   own row and tell me the phone model.
+6. **Basic sharing.** Host → *Allowed Apps* tile → accept the screen-capture prompt → play
+   YouTube Music. The host plays the app directly, so it is ahead of the speakers by the buffer:
+   full sharing is the in-step mode.
+7. **Hotspot.** Host → Network → Hotspot on. Android speakers join from the code; iPhones scan
    the Wi-Fi code in the Invite sheet with the Camera app first.
-6. **Screen off / background.** Lock all phones: playback continues.
+8. **Screen off / background.** Lock all phones: playback continues.
 
 If something is off: Settings › Logs → Copy, and the speaker's *Details* (accuracy, drift,
 lock error, buffered, dropouts) say where it is.
+
+### What was verified for the tuning + remembered-session pass (2026-11-09)
+
+- Engine: 21 unit + 6 end-to-end tests. The tuning test runs the whole loop over real
+  connections with a simulated room (one speaker really 17 ms later than it reports, mic 30 ms
+  behind): it measures 17 ms (±0.5) and the two then play the same frame at the same instant.
+  Detector tests at 48 / 44.1 / 16 kHz mics with echo, hum and noise: within 0.35 ms.
+  Persistence tests: same id and addresses after a host restart; the speaker waits and rejoins
+  by itself with its timing; a reconnect with the same identity stays connected.
+- Android emulator, real UI: Tune card → mic indicator on, 6 s recording, calibration stream
+  reaches the speaker, clean "could not hear itself" message (the emulator mic is silent here,
+  so the acoustic part could not run on the emulator); force-stop + relaunch → hosts again,
+  same id/port, the Linux speaker rejoins in ~2 s with its remembered +7 ms; app as speaker →
+  relaunch rejoins; host killed and restarted → rejoins by itself; *Waiting for host* screen;
+  full sharing → `dumpsys media.audio_flinger` shows our stream on `AUDIO_DEVICE_OUT_SPEAKER`
+  while every other app goes to `REMOTE_SUBMIX` (no loop); tuning during full sharing pauses
+  and resumes it.
+- Not verified: the acoustic tune on real phones (needs real speakers and mics), and the iOS
+  side of it (`GroupPlayMic` in `AppDelegate.swift`: play-and-record session in measurement mode
+  while listening, then back to playback). The iOS output-latency fix (render timestamp +
+  `outputLatency`, cpal counts the IO buffer twice) only shows on a real iPhone.
 
 ### What was verified before handing over (Android 15 emulator + this Linux box)
 
@@ -114,5 +154,6 @@ lock error, buffered, dropouts) say where it is.
 
 - Relay sessions (different networks) need compression: raw PCM (1.5 Mbit/s per speaker) only
   suits a LAN/hotspot. Opus is the next step.
-- Auto-calibration with the microphone (chirp + time of flight) to replace the manual Timing nudge.
+- Basic sharing cannot be in step on the host (the app plays there directly); full sharing is.
+- A source restarts after tuning only for sharing and the sync test; a music file starts over.
 - iPhone cannot be a *phone-audio* source (iOS gives apps no access to other apps' audio).

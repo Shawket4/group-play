@@ -7,32 +7,24 @@ import 'package:rust_bridge/rust_bridge.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Overridden at boot with the loaded preferences.
-final prefsProvider = Provider<SharedPreferences>(
-  (_) => throw StateError('prefsProvider read before boot override'),
-);
+final prefsProvider = Provider<SharedPreferences>((_) => throw StateError('prefsProvider read before boot override'));
 
-/// This phone's identity and calibration. Survive restarts; pushed into the engine.
+/// This phone's name and volume. Survive restarts; pushed into the engine. (Timing is the
+/// host's job now: it tunes every phone, see SessionController.tune.)
 class DeviceSettingsState {
-  const DeviceSettingsState({required this.name, required this.delayMs, required this.volume});
+  const DeviceSettingsState({required this.name, required this.volume});
 
   final String name;
-
-  /// Positive = this phone plays later (use when it sounds early).
-  final double delayMs;
   final double volume;
 
-  DeviceSettingsState copyWith({String? name, double? delayMs, double? volume}) => DeviceSettingsState(
-        name: name ?? this.name,
-        delayMs: delayMs ?? this.delayMs,
-        volume: volume ?? this.volume,
-      );
+  DeviceSettingsState copyWith({String? name, double? volume}) =>
+      DeviceSettingsState(name: name ?? this.name, volume: volume ?? this.volume);
 }
 
 final deviceSettingsProvider = NotifierProvider<DeviceSettings, DeviceSettingsState>(DeviceSettings.new);
 
 class DeviceSettings extends Notifier<DeviceSettingsState> {
   static const _kName = 'deviceName';
-  static const _kDelay = 'delayMs';
   static const _kVolume = 'volume';
 
   SharedPreferences get _prefs => ref.read(prefsProvider);
@@ -40,17 +32,12 @@ class DeviceSettings extends Notifier<DeviceSettingsState> {
   @override
   DeviceSettingsState build() {
     final p = ref.watch(prefsProvider);
-    return DeviceSettingsState(
-      name: p.getString(_kName) ?? 'Phone',
-      delayMs: p.getDouble(_kDelay) ?? 0,
-      volume: p.getDouble(_kVolume) ?? 1,
-    );
+    return DeviceSettingsState(name: p.getString(_kName) ?? 'Phone', volume: p.getDouble(_kVolume) ?? 1);
   }
 
   /// Sends the stored values to the engine (at boot).
   Future<void> applyToEngine() async {
     configure(deviceName: state.name, platform: platformName);
-    await setDelayMs(ms: state.delayMs);
     await setVolume(volume: state.volume);
   }
 
@@ -60,12 +47,6 @@ class DeviceSettings extends Notifier<DeviceSettingsState> {
     state = state.copyWith(name: n);
     configure(deviceName: n, platform: platformName);
     await _prefs.setString(_kName, n);
-  }
-
-  Future<void> setDelay(double ms) async {
-    state = state.copyWith(delayMs: ms);
-    await setDelayMs(ms: ms);
-    await _prefs.setDouble(_kDelay, ms);
   }
 
   Future<void> setVolumeLevel(double v) async {

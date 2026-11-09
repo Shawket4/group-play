@@ -33,12 +33,12 @@ fn frame_heard_at(shared: &std::sync::Arc<group_play_core::player::PlayerShared>
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guest_plays_in_lockstep_with_host() {
     group_play_core::logging::init();
-    let host = Host::start("Host".into(), true).await.unwrap();
+    let host = Host::start("Host".into(), true, None).await.unwrap();
     host.play_pull(Box::new(Clicks::new(48_000, 120.0))).unwrap();
     let ticket = host.ticket();
     assert!(!ticket.addrs.is_empty(), "ticket has addresses: {ticket:?}");
 
-    let guest = Guest::join(ticket, "Guest".into(), "linux".into()).await.unwrap();
+    let guest = Guest::join(ticket, "Guest".into(), "linux".into(), None, false).await.unwrap();
     let ok = wait_until(|| guest.view().state == "connected" && guest.view().sync.samples >= 20, 15).await;
     assert!(ok, "guest connected and synced: {:?}", guest.view());
 
@@ -63,7 +63,7 @@ async fn guest_plays_in_lockstep_with_host() {
     // host-side calibration reaches the guest
     let peer = host.snapshot().peers[0].id.clone();
     host.set_peer_delay(&peer, 42.0);
-    let ok = wait_until(|| guest.local().delay_ns.load(Ordering::Relaxed) == 42_000_000, 5).await;
+    let ok = wait_until(|| guest.local().assigned_delay_ns.load(Ordering::Relaxed) == 42_000_000, 5).await;
     assert!(ok, "delay command applied on guest");
 
     guest.leave().await;
@@ -73,7 +73,7 @@ async fn guest_plays_in_lockstep_with_host() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_fd_capture_streams_and_keeps_rate() {
     group_play_core::logging::init();
-    let host = Host::start("Host".into(), false).await.unwrap();
+    let host = Host::start("Host".into(), false, None).await.unwrap();
     host.set_playout_delay_ms(250);
     let (r, mut w) = std::io::pipe().unwrap();
     // a "capture" producing 48 kHz stereo in real time, 10 ms at a time, with a 50 ppm fast clock
@@ -98,7 +98,7 @@ async fn live_fd_capture_streams_and_keeps_rate() {
         }
     });
     host.play_fd(r.into_raw_fd(), 48_000, 2, "test capture".into()).unwrap();
-    let guest = Guest::join(host.ticket(), "Guest".into(), "linux".into()).await.unwrap();
+    let guest = Guest::join(host.ticket(), "Guest".into(), "linux".into(), None, false).await.unwrap();
     let ok = wait_until(|| guest.local().ring.highest() > 48_000 * 3, 15).await;
     assert!(ok, "guest received ~3 s of live audio, has {}", guest.local().ring.highest());
     let p0 = now_ns();
@@ -116,8 +116,8 @@ async fn live_fd_capture_streams_and_keeps_rate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guest_joins_before_the_stream_starts() {
     group_play_core::logging::init();
-    let host = Host::start("Host".into(), true).await.unwrap();
-    let guest = Guest::join(host.ticket(), "Guest".into(), "linux".into()).await.unwrap();
+    let host = Host::start("Host".into(), true, None).await.unwrap();
+    let guest = Guest::join(host.ticket(), "Guest".into(), "linux".into(), None, false).await.unwrap();
     let ok = wait_until(|| guest.view().state == "connected" && guest.view().sync.samples >= 20, 15).await;
     assert!(ok, "connected and synced first");
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -128,5 +128,134 @@ async fn guest_joins_before_the_stream_starts() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(guest.view().sync.samples > n_before, "pings keep flowing during the burst");
     guest.leave().await;
+    host.shutdown().await;
+}
+
+/// The whole tuning loop over real connections, with a simulated room: the guest's speaker is
+/// really 17 ms later than it reports, the host's is exact. A "microphone" thread renders both
+/// devices the way their speakers would sound and streams the mix into the tuning pipe, 30 ms
+/// late like a real input path. Tuning must delay the host by 17 ms and leave the guest at 0,
+/// after which both sound the same frame at the same instant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tuning_lines_up_a_late_speaker() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    group_play_core::logging::init();
+    let host = Host::start("Host".into(), true, None).await.unwrap();
+    let guest = Guest::join(host.ticket(), "Guest".into(), "linux".into(), None, false).await.unwrap();
+    let ok = wait_until(|| guest.view().state == "connected" && guest.view().sync.samples >= 20, 15).await;
+    assert!(ok, "connected and synced");
+    let ok = wait_until(|| host.snapshot().peers.iter().any(|p| p.connected), 5).await;
+    assert!(ok, "host sees the guest");
+
+    const GUEST_LATE_NS: i64 = 17_000_000;
+    const INPUT_LAG_NS: i64 = 30_000_000;
+    let (r, mut w) = std::io::pipe().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let mic = {
+        let (hs, gs, stop) = (host.local().clone(), guest.local().clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut hr = Renderer::new(hs, 48_000.0, 2);
+            let mut gr = Renderer::new(gs, 48_000.0, 2);
+            let (mut hb, mut gb) = (vec![0.0f32; 960], vec![0.0f32; 960]);
+            let mut t = now_ns() - INPUT_LAG_NS;
+            while !stop.load(Ordering::Relaxed) {
+                // the block of sound in the air during [t, t + 10 ms), available INPUT_LAG later
+                while now_ns() < t + 10_000_000 + INPUT_LAG_NS {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                hr.render(&mut hb, t);
+                gr.render(&mut gb, t - GUEST_LATE_NS); // what it plays now it thinks was heard 17 ms ago
+                let bytes: Vec<u8> = (0..480)
+                    .flat_map(|i| (((hb[2 * i] + 0.3 * gb[2 * i]) * 0.8 * 32767.0) as i16).to_le_bytes())
+                    .collect();
+                if w.write_all(&bytes).is_err() {
+                    return;
+                }
+                t += 10_000_000;
+            }
+        })
+    };
+    let job = host.tune_start(r.into_raw_fd(), 48_000, 1).unwrap();
+    assert!(host.is_tuning());
+    let report = tokio::task::spawn_blocking(move || job.run()).await.unwrap().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    mic.join().unwrap();
+    assert!(!host.is_tuning());
+    let late = report.devices[1].late_ms.expect("guest heard");
+    assert!((late - 17.0).abs() < 0.5, "measured {late} ms, report {report:?}");
+    assert!((host.self_delay_ms() - 17.0).abs() < 0.5, "host delay {}", host.self_delay_ms());
+    let ok = wait_until(|| guest.local().assigned_delay_ns.load(Ordering::Relaxed).abs() < 500_000, 5).await;
+    assert!(ok, "guest delay {}", guest.local().assigned_delay_ns.load(Ordering::Relaxed));
+    assert!(host.snapshot().peers[0].timing.tuned);
+    // gates are gone: both play everything again
+    host.play_pull(Box::new(Clicks::new(48_000, 120.0))).unwrap();
+    let ok = wait_until(|| guest.local().ring.highest() > 48_000, 10).await;
+    assert!(ok, "guest received clicks after tuning");
+    // what each speaker sounds at real time T: host renders T exactly, the guest renders T - 17 ms
+    let t = now_ns() + 200_000_000;
+    let h = frame_heard_at(host.local(), t);
+    let g = frame_heard_at(guest.local(), t - GUEST_LATE_NS);
+    assert!((h - g).abs() <= 48, "after tuning: host frame {h}, guest frame {g}");
+    guest.leave().await;
+    host.shutdown().await;
+}
+
+/// A remembered session: same identity => same host id; when the host ends and starts again,
+/// the guest waits instead of giving up and rejoins by itself, and keeps its tuned delay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remembered_session_rejoins_after_the_host_restarts() {
+    group_play_core::logging::init();
+    let host_key = [7u8; 32];
+    let guest_key = [9u8; 32];
+    let host = Host::start("Host".into(), true, Some(host_key)).await.unwrap();
+    let ticket = host.ticket();
+    let guest = Guest::join(ticket.clone(), "Guest".into(), "linux".into(), Some(guest_key), false).await.unwrap();
+    let ok = wait_until(|| guest.view().state == "connected", 15).await;
+    assert!(ok, "connected");
+    assert!(guest.view().host_ticket.is_some(), "welcome carries the ticket to remember");
+    let ok = wait_until(|| host.snapshot().peers.iter().any(|p| p.connected), 5).await;
+    assert!(ok);
+    let guest_id = host.snapshot().peers[0].id.clone();
+    host.set_peer_delay(&guest_id, 12.0);
+    let ok = wait_until(|| guest.local().assigned_delay_ns.load(Ordering::Relaxed) == 12_000_000, 5).await;
+    assert!(ok, "delay applied");
+
+    host.shutdown().await;
+    let ok = wait_until(|| guest.view().state == "waiting", 10).await;
+    assert!(ok, "guest waits for the host, state {}", guest.view().state);
+
+    let host2 = Host::start("Host".into(), true, Some(host_key)).await.unwrap();
+    assert_eq!(host2.ticket().endpoint_id, ticket.endpoint_id, "same identity, same id");
+    assert_eq!(host2.ticket().addrs, ticket.addrs, "same port, same addresses");
+    host2.set_known_timings(vec![(guest_id.clone(), group_play_core::host::Timing { delay_ms: 12.0, tuned: true })]);
+    let ok = wait_until(|| guest.view().state == "connected", 30).await;
+    assert!(ok, "guest rejoined by itself, state {}", guest.view().state);
+    let ok = wait_until(|| host2.snapshot().peers.iter().any(|p| p.connected && p.id == guest_id), 5).await;
+    assert!(ok, "same guest id");
+    assert_eq!(guest.local().assigned_delay_ns.load(Ordering::Relaxed), 12_000_000, "remembered delay re-sent");
+    guest.leave().await;
+    host2.shutdown().await;
+}
+
+/// A guest with a stable identity reconnects before the host noticed the old connection die:
+/// the old connection's cleanup must not mark the new one as gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnect_with_the_same_identity_stays_connected() {
+    group_play_core::logging::init();
+    let host = Host::start("Host".into(), true, None).await.unwrap();
+    let key = [5u8; 32];
+    let old = Guest::join(host.ticket(), "Guest".into(), "linux".into(), Some(key), false).await.unwrap();
+    let ok = wait_until(|| host.snapshot().peers.iter().any(|p| p.connected), 10).await;
+    assert!(ok, "first connection");
+    let new = Guest::join(host.ticket(), "Guest".into(), "linux".into(), Some(key), false).await.unwrap();
+    let ok = wait_until(|| new.view().state == "connected", 10).await;
+    assert!(ok, "second connection");
+    old.leave().await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let peers = host.snapshot().peers;
+    assert_eq!(peers.len(), 1, "one entry per identity");
+    assert!(peers[0].connected, "the newer connection is still connected");
+    new.leave().await;
     host.shutdown().await;
 }

@@ -6,7 +6,8 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-/// This phone as a speaker: is it in sync, and the two things a person may adjust.
+/// This phone as a speaker: is it in sync, and its volume. Timing belongs to the host, which
+/// tunes every phone by ear.
 class SpeakerScreen extends ConsumerWidget {
   const SpeakerScreen({super.key});
 
@@ -56,9 +57,10 @@ class SpeakerScreen extends ConsumerWidget {
 
     final l = status.local;
     final connected = status.state == 'connected';
+    final waiting = status.state == 'waiting';
     final q = connected
         ? syncQuality(synced: l.syncValid, playing: l.playing, errMs: l.errMs)
-        : (label: status.state == 'reconnecting' ? 'Reconnecting' : 'Connecting', tone: GPTone.warn);
+        : (label: waiting ? 'Waiting for host' : (status.state == 'reconnecting' ? 'Reconnecting' : 'Connecting'), tone: GPTone.warn);
     return GPPage(
       title: status.hostName,
       previousPageTitle: 'Home',
@@ -68,7 +70,9 @@ class SpeakerScreen extends ConsumerWidget {
           child: GPSyncCard(
             label: q.label,
             tone: q.tone,
-            caption: status.source ?? 'Waiting for ${status.hostName} to play something',
+            caption: waiting
+                ? 'Open Group Play on ${status.hostName}: this phone rejoins by itself.'
+                : (status.source ?? 'Waiting for ${status.hostName} to play something'),
             errorMs: l.errMs,
             active: connected && l.playing && l.syncValid,
             badges: [
@@ -79,9 +83,9 @@ class SpeakerScreen extends ConsumerWidget {
         ),
         GPBlock(
           child: _Calibration(
-            delayMs: settings.delayMs,
+            delayMs: l.delayMs,
+            hostName: status.hostName,
             volume: settings.volume,
-            onDelay: (v) => unawaited(s.setDelay(v)),
             onVolume: (v) => unawaited(s.setVolumeLevel(v)),
           ),
         ),
@@ -101,11 +105,11 @@ class SpeakerScreen extends ConsumerWidget {
 }
 
 class _Calibration extends StatelessWidget {
-  const _Calibration({required this.delayMs, required this.volume, required this.onDelay, required this.onVolume});
+  const _Calibration({required this.delayMs, required this.hostName, required this.volume, required this.onVolume});
 
   final double delayMs;
+  final String hostName;
   final double volume;
-  final ValueChanged<double> onDelay;
   final ValueChanged<double> onVolume;
 
   @override
@@ -119,17 +123,6 @@ class _Calibration extends StatelessWidget {
           child: Column(
             children: [
               GPSliderCell(
-                label: 'Timing',
-                value: delayMs,
-                min: -200,
-                max: 200,
-                step: 1,
-                format: formatSignedMs,
-                hint: 'Early compared with the others? Add delay. Late? Take some away.',
-                onChanged: onDelay,
-              ),
-              const GPRule(indent: GPSpace.md),
-              GPSliderCell(
                 label: 'Volume',
                 value: volume,
                 min: 0,
@@ -138,6 +131,14 @@ class _Calibration extends StatelessWidget {
                 minIcon: CupertinoIcons.speaker_fill,
                 maxIcon: CupertinoIcons.speaker_3_fill,
                 onChanged: onVolume,
+              ),
+              const GPRule(indent: GPSpace.md),
+              GPRow(
+                title: 'Timing',
+                subtitle: 'Set by $hostName when it tunes',
+                value: formatSignedMs(delayMs),
+                figure: true,
+                chevron: false,
               ),
             ],
           ),
@@ -160,7 +161,9 @@ class SpeakerDetailsScreen extends ConsumerWidget {
       previousPageTitle: 'Back',
       slivers: [
         if (l == null || status == null)
-          const SliverToBoxAdapter(child: GPEmptyState(icon: CupertinoIcons.speaker_2_fill, title: 'Not connected'))
+          const SliverToBoxAdapter(
+            child: GPEmptyState(icon: CupertinoIcons.speaker_2_fill, title: 'Not connected'),
+          )
         else ...[
           GPSection(
             header: 'Clock',

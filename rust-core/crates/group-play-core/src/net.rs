@@ -6,14 +6,39 @@ use anyhow::{Context, Result};
 use iroh::{endpoint::presets, Endpoint, EndpointAddr, TransportAddr};
 use std::net::{IpAddr, SocketAddr};
 
+/// The host's UDP port when it has a fixed identity, so a remembered ticket's direct addresses
+/// stay valid across launches (as long as the phone keeps its Wi-Fi address).
+pub const HOST_PORT: u16 = 47_100;
+
 /// One endpoint per session. N0 preset: n0's relays (so a guest on another network can still
 /// reach the host) plus direct paths, which are used whenever both are on the same LAN/hotspot.
-pub async fn make_endpoint(accept: bool) -> Result<Endpoint> {
-    let mut b = Endpoint::builder(presets::N0);
-    if accept {
-        b = b.alpns(vec![ALPN.to_vec()]);
+/// `secret`: a fixed identity (same endpoint id every launch), or None for a fresh one.
+pub async fn make_endpoint(accept: bool, secret: Option<[u8; 32]>) -> Result<Endpoint> {
+    let build = |fixed_port: bool| -> Result<iroh::endpoint::Builder> {
+        let mut b = Endpoint::builder(presets::N0);
+        if let Some(key) = secret {
+            b = b.secret_key(iroh::SecretKey::from_bytes(&key));
+        }
+        if accept {
+            b = b.alpns(vec![ALPN.to_vec()]);
+        }
+        if fixed_port {
+            use iroh::endpoint::BindOpts;
+            // IPv4 must get the port (that is what the LAN ticket uses); IPv6 may fail
+            b = b
+                .clear_ip_transports()
+                .bind_addr_with_opts(SocketAddr::from(([0, 0, 0, 0], HOST_PORT)), BindOpts::default())?
+                .bind_addr_with_opts(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, HOST_PORT)), BindOpts::default().set_is_required(false))?;
+        }
+        Ok(b)
+    };
+    if accept && secret.is_some() {
+        match build(true)?.bind().await {
+            Ok(ep) => return Ok(ep),
+            Err(e) => log::warn!("net: port {HOST_PORT} unavailable ({e}), using a random one"),
+        }
     }
-    b.bind().await.context("bind endpoint")
+    build(false)?.bind().await.context("bind endpoint")
 }
 
 /// Non-loopback interface addresses (IPv4 first, then global/ULA IPv6).
@@ -117,4 +142,14 @@ pub fn path_rtt_ms(conn: &iroh::endpoint::Connection) -> f64 {
         }
     }
     0.0
+}
+
+/// A fresh identity key (store it and pass it to [`make_endpoint`] every launch).
+pub fn new_identity_key() -> [u8; 32] {
+    iroh::SecretKey::generate().to_bytes()
+}
+
+/// The endpoint id other phones see for `key` (what a host lists as the peer id).
+pub fn identity_id(key: &[u8; 32]) -> String {
+    iroh::SecretKey::from_bytes(key).public().to_string()
 }

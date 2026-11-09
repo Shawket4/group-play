@@ -24,7 +24,10 @@ pub struct PeerStatus {
     pub underrun_ms: f64,
     pub latency_ms: f64,
     pub err_ms: f64,
+    /// The delay the host gives this speaker (tuning plus fine adjustment), ms.
     pub delay_ms: f64,
+    /// Measured by tuning (rather than never tuned).
+    pub tuned: bool,
     pub volume: f64,
     pub output: String,
     pub playing: bool,
@@ -41,7 +44,10 @@ pub struct LocalStatus {
     pub buffer_ms: f64,
     pub underrun_ms: f64,
     pub jumps: u64,
+    /// Host: this phone's own delay. Guest: the delay the host gave it. ms.
     pub delay_ms: f64,
+    /// Host: its own delay came from tuning.
+    pub tuned: bool,
     pub volume: f64,
     pub enabled: bool,
     pub playing: bool,
@@ -56,10 +62,13 @@ pub struct LocalStatus {
 pub struct EngineStatus {
     /// "idle" | "host" | "guest"
     pub role: String,
-    /// Guest: "connecting" | "connected" | "reconnecting" | "ended". Host: "hosting".
+    /// Guest: "connected" | "reconnecting" | "waiting" (host away) | "ended". Host: "hosting".
     pub state: String,
     pub host_name: String,
+    /// Host: its join ticket. Guest: the host's latest ticket (remember this one).
     pub ticket: Option<String>,
+    /// Host: tuning is running.
+    pub tuning: bool,
     pub path: String,
     pub path_rtt_ms: f64,
     pub source: Option<String>,
@@ -68,6 +77,34 @@ pub struct EngineStatus {
     pub local: LocalStatus,
     pub ended_reason: Option<String>,
     pub last_error: Option<String>,
+}
+
+/// A timing the host remembered from an earlier session.
+#[derive(Clone, Debug)]
+pub struct KnownTiming {
+    pub peer_id: String,
+    pub delay_ms: f64,
+    pub tuned: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TunedDevice {
+    /// Empty for the host phone itself.
+    pub peer_id: String,
+    pub name: String,
+    pub heard: bool,
+    /// How much later than the host it sounded with equal delays (ms), when heard.
+    pub late_ms: Option<f64>,
+    /// Its delay now (ms).
+    pub delay_ms: f64,
+    pub spread_ms: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TuneReport {
+    pub devices: Vec<TunedDevice>,
+    /// How far apart the heard devices sounded before tuning (ms).
+    pub spread_before_ms: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +126,27 @@ pub fn init_app() {
 }
 
 /// Name shown to the other phones, and the platform ("android", "ios", ...).
+/// A new random identity key (32 bytes) for [`set_identity`]. Store it; reuse it every launch.
+#[flutter_rust_bridge::frb(sync)]
+pub fn new_identity() -> Vec<u8> {
+    engine::net::new_identity_key().to_vec()
+}
+
+/// This phone's identity from now on: its id (and as host, its ticket) stays the same across
+/// launches, so remembered sessions find each other again.
+#[flutter_rust_bridge::frb(sync)]
+pub fn set_identity(key: Vec<u8>) -> Result<()> {
+    let key: [u8; 32] = key.try_into().map_err(|_| anyhow!("identity key must be 32 bytes"))?;
+    *engine().identity.lock() = Some(key);
+    Ok(())
+}
+
+/// This phone's id as the other phones see it (same as a host's peer id for it).
+#[flutter_rust_bridge::frb(sync)]
+pub fn identity_id() -> Option<String> {
+    engine().identity.lock().map(|k| engine::net::identity_id(&k))
+}
+
 #[flutter_rust_bridge::frb(sync)]
 pub fn configure(device_name: String, platform: String) {
     let e = engine();
@@ -136,7 +194,8 @@ pub async fn start_host() -> Result<String> {
             end_role(&mut role).await;
             let local = *e.host_local_playback.lock();
             let name = e.device_name.lock().clone();
-            let host = Host::start(name, local).await?;
+            let identity = *e.identity.lock();
+            let host = Host::start(name, local, identity).await?;
             apply_local_settings(host.local());
             let ticket = host.ticket().encode();
             log::info!("host: ticket {ticket}");
@@ -207,6 +266,51 @@ pub async fn set_host_local_playback(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Android: route the host's own playback straight to the speaker/headphones. Needed while full
+/// sharing records the phone's output: the default route would lead into that recording.
+pub async fn set_host_explicit_route(enabled: bool) -> Result<()> {
+    with_host(move |h| {
+        h.local().explicit_route.store(enabled, Ordering::Relaxed);
+        Ok(())
+    })
+    .await
+}
+
+/// Timings remembered from earlier sessions; applied when those speakers join.
+pub async fn set_known_timings(timings: Vec<KnownTiming>) -> Result<()> {
+    with_host(move |h| {
+        h.set_known_timings(timings.into_iter().map(|t| (t.peer_id, engine::host::Timing { delay_ms: t.delay_ms, tuned: t.tuned })).collect());
+        Ok(())
+    })
+    .await
+}
+
+/// The host phone's own delay (ms, positive = later). `tuned`: it came from tuning.
+pub async fn set_host_delay_ms(ms: f64, tuned: Option<bool>) -> Result<()> {
+    with_host(move |h| {
+        h.set_self_delay(ms, tuned);
+        Ok(())
+    })
+    .await
+}
+
+/// Tunes every connected speaker by ear: each phone chirps in turn while this phone's
+/// microphone (`mic_fd`: s16le, `mic_channels` interleaved) listens. Takes 4–10 s. Applies the
+/// new delays and returns what it found. The engine owns `mic_fd`; stop the recording after.
+pub async fn tune_speakers(mic_fd: i32, mic_rate: u32, mic_channels: u32) -> Result<TuneReport> {
+    let job = with_host(move |h| h.tune_start(mic_fd, mic_rate, mic_channels)).await?;
+    // the measurement runs without holding the session lock, so status keeps flowing
+    let report = tokio::task::spawn_blocking(move || job.run()).await??;
+    Ok(TuneReport {
+        devices: report
+            .devices
+            .into_iter()
+            .map(|d| TunedDevice { peer_id: d.id, name: d.name, heard: d.heard, late_ms: d.late_ms, delay_ms: d.delay_ms, spread_ms: d.spread_ms })
+            .collect(),
+        spread_before_ms: report.spread_before_ms,
+    })
+}
+
 pub async fn set_peer_delay_ms(peer_id: String, ms: f64) -> Result<()> {
     with_host(move |h| {
         h.set_peer_delay(&peer_id, ms);
@@ -235,8 +339,9 @@ pub fn parse_ticket(ticket: String) -> Result<TicketInfo> {
     })
 }
 
-/// Joins a host. Returns the host's name once connected.
-pub async fn join(ticket: String) -> Result<String> {
+/// Joins a host. Returns the host's name once connected. `wait`: a remembered session; do not
+/// fail if the host is not up yet, keep trying in the background (state "waiting").
+pub async fn join(ticket: String, wait: bool) -> Result<String> {
     let t = Ticket::decode(&ticket)?;
     engine()
         .rt
@@ -246,7 +351,8 @@ pub async fn join(ticket: String) -> Result<String> {
             end_role(&mut role).await;
             let name = t.host_name.clone();
             let (me, platform) = (e.device_name.lock().clone(), e.platform.lock().clone());
-            let g = Guest::join(t, me, platform).await?;
+            let identity = *e.identity.lock();
+            let g = Guest::join(t, me, platform, identity, wait).await?;
             apply_local_settings(g.local());
             *role = Role::Guest(g);
             Ok::<_, anyhow::Error>(name)
@@ -336,10 +442,11 @@ fn local_status(l: &engine::player::PlayerShared, stream_rate: u32, sync: Option
         buffer_ms: if pos >= 0 { (l.ring.highest() as f64 - pos as f64) / rate * 1000.0 } else { 0.0 },
         underrun_ms: l.underrun_frames.load(Ordering::Relaxed) as f64 / out_rate.max(1) as f64 * 1000.0,
         jumps: l.jumps.load(Ordering::Relaxed),
-        delay_ms: l.delay_ns.load(Ordering::Relaxed) as f64 / 1e6,
+        delay_ms: l.total_delay_ns() as f64 / 1e6,
+        tuned: false,
         volume: l.volume() as f64,
         enabled: l.enabled.load(Ordering::Relaxed),
-        playing: pos >= 0,
+        playing: pos >= 0 && l.ring.highest() as i64 > pos,
         sync_valid: sync.valid && sync.samples >= 5 || sync.samples == 0 && sync.valid,
         sync_rtt_ms: sync.min_rtt_ns as f64 / 1e6,
         sync_offset_ms: sync.offset_ns / 1e6,
@@ -358,6 +465,7 @@ async fn snapshot() -> EngineStatus {
             state: "idle".into(),
             host_name: String::new(),
             ticket: None,
+            tuning: false,
             path: String::new(),
             path_rtt_ms: 0.0,
             source: None,
@@ -372,7 +480,8 @@ async fn snapshot() -> EngineStatus {
                 buffer_ms: 0.0,
                 underrun_ms: 0.0,
                 jumps: 0,
-                delay_ms: *e.delay_ms.lock(),
+                delay_ms: 0.0,
+                tuned: false,
                 volume: *e.volume.lock(),
                 enabled: true,
                 playing: false,
@@ -392,6 +501,7 @@ async fn snapshot() -> EngineStatus {
                 state: "hosting".into(),
                 host_name: e.device_name.lock().clone(),
                 ticket: Some(s.ticket),
+                tuning: h.is_tuning(),
                 path: String::new(),
                 path_rtt_ms: 0.0,
                 source: s.source,
@@ -428,7 +538,8 @@ async fn snapshot() -> EngineStatus {
                             underrun_ms: st.underrun_ms,
                             latency_ms: st.latency_ms,
                             err_ms: st.err_ms,
-                            delay_ms: st.delay_ms,
+                            delay_ms: p.timing.delay_ms,
+                            tuned: p.timing.tuned,
                             volume: st.volume,
                             output: st.output,
                             playing: st.playing,
@@ -436,7 +547,7 @@ async fn snapshot() -> EngineStatus {
                         }
                     })
                     .collect(),
-                local: local_status(h.local(), s.sample_rate, None),
+                local: LocalStatus { tuned: h.self_tuned(), ..local_status(h.local(), s.sample_rate, None) },
                 ended_reason: None,
                 last_error,
             }
@@ -447,7 +558,8 @@ async fn snapshot() -> EngineStatus {
                 role: "guest".into(),
                 state: v.state.clone(),
                 host_name: v.host_name.clone(),
-                ticket: None,
+                ticket: v.host_ticket.clone(),
+                tuning: false,
                 path: v.path.clone(),
                 path_rtt_ms: v.path_rtt_ms,
                 source: v.source.clone(),

@@ -29,6 +29,8 @@ pub struct GuestView {
     pub sample_rate: u32,
     pub sync: ClockEstimate,
     pub kicked: Option<String>,
+    /// The host's latest ticket (from its welcome): remember this one to find it next time.
+    pub host_ticket: Option<String>,
 }
 
 struct Shared {
@@ -37,6 +39,8 @@ struct Shared {
     local: Arc<PlayerShared>,
     stream_id: Mutex<Option<u32>>,
     stop: AtomicBool,
+    /// The host went away on purpose (ended the session, closed the app): wait for it.
+    host_away: AtomicBool,
     name: String,
     platform: String,
 }
@@ -50,8 +54,10 @@ pub struct Guest {
 
 impl Guest {
     /// Connects once (so the caller gets a clear error), then keeps the session alive.
-    pub async fn join(ticket: Ticket, name: String, platform: String) -> Result<Guest> {
-        let endpoint = net::make_endpoint(false).await?;
+    /// `wait`: do not fail when the host is not there yet (a remembered session at launch):
+    /// keep trying in the background, showing "waiting".
+    pub async fn join(ticket: Ticket, name: String, platform: String, identity: Option<[u8; 32]>, wait: bool) -> Result<Guest> {
+        let endpoint = net::make_endpoint(false, identity).await?;
         let ring = PcmRing::new(48_000 * 12);
         let local = PlayerShared::new(ring);
         // not playable until synced
@@ -62,26 +68,35 @@ impl Guest {
             local: local.clone(),
             stream_id: Mutex::new(None),
             stop: AtomicBool::new(false),
+            host_away: AtomicBool::new(wait),
             name,
             platform,
         });
         let addr = net::addr_from_ticket(&ticket)?;
-        let conn = tokio::time::timeout(Duration::from_secs(20), endpoint.connect(addr.clone(), proto::ALPN))
-            .await
-            .context("timed out reaching the host (same Wi-Fi? hotspot joined?)")?
-            .context("could not reach the host")?;
+        let conn = if wait {
+            shared.view.lock().state = "waiting".into();
+            None
+        } else {
+            Some(
+                tokio::time::timeout(Duration::from_secs(20), endpoint.connect(addr.clone(), proto::ALPN))
+                    .await
+                    .context("timed out reaching the host (same Wi-Fi? hotspot joined?)")?
+                    .context("could not reach the host")?,
+            )
+        };
         let player = Player::start(local);
         let task = {
             let shared = shared.clone();
             let endpoint = endpoint.clone();
             tokio::spawn(async move {
-                let mut conn = Some(conn);
+                let mut conn = conn;
                 let mut backoff = 1u64;
                 while !shared.stop.load(Ordering::Relaxed) {
                     let c = match conn.take() {
                         Some(c) => c,
                         None => {
-                            shared.view.lock().state = "reconnecting".into();
+                            let away = shared.host_away.load(Ordering::Relaxed);
+                            shared.view.lock().state = if away { "waiting" } else { "reconnecting" }.into();
                             match tokio::time::timeout(Duration::from_secs(10), endpoint.connect(addr.clone(), proto::ALPN)).await {
                                 Ok(Ok(c)) => c,
                                 _ => {
@@ -103,6 +118,10 @@ impl Guest {
                     }
                     shared.local.set_timeline(None, false);
                     *shared.stream_id.lock() = None;
+                    if shared.host_away.load(Ordering::Relaxed) {
+                        shared.view.lock().state = "waiting".into();
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
                 }
             })
         };
@@ -135,14 +154,20 @@ async fn run_session(conn: Connection, shared: Arc<Shared>) -> Result<()> {
     let (mut send, mut recv) = conn.open_bi().await.context("control stream")?;
     proto::write_msg(&mut send, &GuestMsg::Hello { name: shared.name.clone(), platform: shared.platform.clone(), version: PROTOCOL_VERSION }).await?;
     match proto::read_msg::<HostMsg>(&mut recv).await?.context("host closed")? {
-        HostMsg::Welcome { host_name, .. } => {
+        HostMsg::Welcome { host_name, ticket, .. } => {
             let mut v = shared.view.lock();
             v.host_name = host_name;
             v.state = "connected".into();
             v.path = net::path_kind(&conn);
+            v.host_ticket = Some(ticket);
+            shared.host_away.store(false, Ordering::Relaxed);
         }
-        HostMsg::Kick { reason } => {
-            shared.view.lock().kicked = Some(reason.clone());
+        HostMsg::Kick { reason, resumable } => {
+            if resumable {
+                shared.host_away.store(true, Ordering::Relaxed);
+            } else {
+                shared.view.lock().kicked = Some(reason.clone());
+            }
             anyhow::bail!("host refused: {reason}");
         }
         other => anyhow::bail!("unexpected {other:?}"),
@@ -155,10 +180,16 @@ async fn run_session(conn: Connection, shared: Arc<Shared>) -> Result<()> {
         tokio::spawn(async move {
             while let Ok(Some(msg)) = proto::read_msg::<HostMsg>(&mut recv).await {
                 match msg {
-                    HostMsg::SetDelay { delay_ms } => shared.local.delay_ns.store((delay_ms * 1e6) as i64, Ordering::Relaxed),
+                    HostMsg::SetDelay { delay_ms } => shared.local.assigned_delay_ns.store((delay_ms * 1e6) as i64, Ordering::Relaxed),
                     HostMsg::SetVolume { volume } => shared.local.set_volume(volume as f32),
-                    HostMsg::Kick { reason } => {
-                        shared.view.lock().kicked = Some(reason);
+                    HostMsg::Gate { gate } => shared.local.set_gate(gate),
+                    HostMsg::Kick { reason, resumable } => {
+                        if resumable {
+                            log::info!("guest: {reason}; waiting for the host to come back");
+                            shared.host_away.store(true, Ordering::Relaxed);
+                        } else {
+                            shared.view.lock().kicked = Some(reason);
+                        }
                         break;
                     }
                     HostMsg::Welcome { .. } => {}
@@ -194,6 +225,11 @@ async fn run_session(conn: Connection, shared: Arc<Shared>) -> Result<()> {
     media.abort();
     reporter.abort();
     control.abort();
+    shared.local.set_gate(None);
+    if shared.host_away.load(Ordering::Relaxed) {
+        conn.close(0u32.into(), b"bye");
+        return Ok(());
+    }
     if shared.view.lock().kicked.is_none() {
         anyhow::bail!("connection lost");
     }
@@ -215,10 +251,11 @@ fn status_of(shared: &Shared) -> GuestStatus {
         underrun_ms: l.underrun_frames.load(Ordering::Relaxed) as f64 / out_rate * 1000.0,
         latency_ms: l.latency_ns.load(Ordering::Relaxed) as f64 / 1e6,
         err_ms: l.err_ns.load(Ordering::Relaxed) as f64 / 1e6,
-        delay_ms: l.delay_ns.load(Ordering::Relaxed) as f64 / 1e6,
+        delay_ms: l.total_delay_ns() as f64 / 1e6,
         volume: l.volume() as f64,
         output: l.device_name.lock().clone(),
-        playing: pos >= 0,
+        // playing = audio for the current position is actually here (not just a timeline)
+        playing: pos >= 0 && l.ring.highest() as i64 > pos,
         jumps: l.jumps.load(Ordering::Relaxed),
     }
 }
@@ -227,14 +264,21 @@ pub fn guest_status(g: &Guest) -> GuestStatus {
     status_of(&g.shared)
 }
 
+/// A host that stops answering pings this long is gone (app killed, out of range): drop the
+/// connection now instead of waiting for QUIC's idle timeout, and start reconnecting.
+const HOST_SILENT_NS: i64 = 5_000_000_000;
+
 async fn ping_loop(conn: Connection, shared: Arc<Shared>) {
+    let last_pong = Arc::new(std::sync::atomic::AtomicI64::new(now_ns()));
     let reader = {
+        let last_pong = last_pong.clone();
         let conn = conn.clone();
         let shared = shared.clone();
         tokio::spawn(async move {
             while let Ok(d) = conn.read_datagram().await {
                 let t3 = now_ns();
                 if let Ok(Dgram::Pong { t0, t1, t2, .. }) = proto::decode::<Dgram>(&d) {
+                    last_pong.store(t3, Ordering::Relaxed);
                     let est = {
                         let mut s = shared.sync.lock();
                         s.add(SyncSample { t0, t1, t2, t3 });
@@ -257,6 +301,11 @@ async fn ping_loop(conn: Connection, shared: Arc<Shared>) {
             }
         }
         seq = seq.wrapping_add(1);
+        if now_ns() - last_pong.load(Ordering::Relaxed) > HOST_SILENT_NS {
+            log::info!("guest: host stopped answering, reconnecting");
+            conn.close(0u32.into(), b"host silent");
+            break;
+        }
         // fast at first to converge, then a steady trickle to follow drift
         let elapsed = now_ns() - started;
         let wait = if elapsed < 3_000_000_000 { 40 } else if elapsed < 20_000_000_000 { 150 } else { 400 };
@@ -286,6 +335,7 @@ fn apply_media(shared: &Shared, msg: Media) {
             if *cur != Some(id) {
                 shared.local.ring.clear();
                 *cur = Some(id);
+                shared.local.set_stream_id(id);
                 shared.local.set_timeline(Some(timeline), true);
                 log::info!("guest: stream {id} '{desc}' at {sample_rate} Hz");
             } else {

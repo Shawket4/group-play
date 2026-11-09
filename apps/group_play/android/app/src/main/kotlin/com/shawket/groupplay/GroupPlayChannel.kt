@@ -174,6 +174,19 @@ class GroupPlayChannel(private val activity: MainActivity, messenger: BinaryMess
                 }
             }
 
+            "startMic" -> {
+                if (!granted(Manifest.permission.RECORD_AUDIO)) {
+                    result.error("mic", "Allow the microphone so this phone can listen while tuning.", null); return
+                }
+                val rate = call.argument<Int>("sampleRate") ?: 48000
+                result.success(MicRecorder.start(activity, rate))
+            }
+
+            "stopMic" -> {
+                MicRecorder.stop(activity)
+                result.success(null)
+            }
+
             "stopCapture" -> {
                 CaptureManager.stopAll()
                 result.success(null)
