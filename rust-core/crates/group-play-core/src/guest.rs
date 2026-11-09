@@ -9,7 +9,7 @@ use super::ring::PcmRing;
 use super::sync::{ClockEstimate, ClockSync, SyncSample};
 use super::ticket::Ticket;
 use anyhow::{Context, Result};
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, ReadError, ReadExactError};
 use iroh::Endpoint;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -352,7 +352,16 @@ async fn read_uni(mut recv: iroh::endpoint::RecvStream, shared: &Shared) {
             }
             .await;
             if let Err(e) = res {
-                log::warn!("guest: media ended: {e:#}");
+                // a dropped connection ends it too; the session loop reports that
+                let lost = matches!(
+                    e.downcast_ref::<ReadExactError>(),
+                    Some(ReadExactError::ReadError(ReadError::ConnectionLost(_)))
+                );
+                if lost {
+                    log::debug!("guest: media ended with the connection");
+                } else {
+                    log::warn!("guest: media ended: {e:#}");
+                }
             }
         }
         proto::STREAM_SEGMENT => {
@@ -368,10 +377,11 @@ async fn read_uni(mut recv: iroh::endpoint::RecvStream, shared: &Shared) {
             let mut pcm = vec![0u8; hdr.frames as usize * 4];
             match recv.read_exact(&mut pcm).await {
                 Ok(()) => apply_segment(shared, hdr, pcm),
-                // the host reset it: it could not arrive in time
-                Err(_) => {
+                // the host reset it: it could not arrive in time (a dropped connection is not late audio)
+                Err(ReadExactError::ReadError(ReadError::Reset(_))) => {
                     shared.late_frames.fetch_add(hdr.frames as u64, Ordering::Relaxed);
                 }
+                Err(_) => {}
             }
         }
         k => log::warn!("guest: unknown stream kind {k}"),
@@ -383,8 +393,9 @@ fn apply_segment(shared: &Shared, hdr: SegmentHeader, pcm: Vec<u8>) {
     let mut m = shared.media.lock();
     match m.stream_id {
         Some(id) if id == hdr.id => {
-            let pos = shared.local.position_frame.load(Ordering::Relaxed);
-            if pos >= 0 && hdr.first_frame + hdr.frames as u64 <= pos as u64 {
+            // only this stream's position counts: right after a StreamStart the callback may
+            // still report where it was in the previous one, and the new stream starts at 0
+            if shared.local.current_position().is_some_and(|pos| hdr.first_frame + hdr.frames as u64 <= pos as u64) {
                 shared.late_frames.fetch_add(hdr.frames as u64, Ordering::Relaxed);
                 return;
             }
@@ -472,6 +483,12 @@ mod tests {
         Media::StreamStart { id, sample_rate: 48_000, timeline: Timeline::new(0, 48_000.0), desc: "x".into() }
     }
 
+    /// As if the output callback had played up to `pos` of the current stream.
+    fn playing_at(s: &Shared, pos: i64) {
+        s.local.position_frame.store(pos, Ordering::Relaxed);
+        s.local.position_generation.store(s.local.render.read().generation, Ordering::Relaxed);
+    }
+
     fn has(s: &Shared, f: i64) -> bool {
         s.local.ring.with_reader(|r| r.frame(f).is_some())
     }
@@ -491,7 +508,7 @@ mod tests {
     fn late_and_stale_segments_are_not_played() {
         let s = shared();
         apply_media(&s, start(5));
-        s.local.position_frame.store(500, Ordering::Relaxed);
+        playing_at(&s, 500);
         let (h, p) = seg(5, 100, 10); // ends long before the play position
         apply_segment(&s, h, p);
         assert!(!has(&s, 100));
@@ -502,5 +519,18 @@ mod tests {
         let (h, p) = seg(5, 600, 10);
         apply_segment(&s, h, p);
         assert!(has(&s, 600));
+    }
+
+    #[test]
+    fn a_new_stream_starts_whole_after_another_was_playing() {
+        let s = shared();
+        apply_media(&s, start(5));
+        playing_at(&s, 1_000_000); // 20 s into the previous track
+        apply_media(&s, Media::StreamStop { id: 5 });
+        apply_media(&s, start(6));
+        let (h, p) = seg(6, 0, 10); // the new track's first chunk, before any callback ran
+        apply_segment(&s, h, p);
+        assert!(has(&s, 0), "the opening of the new stream must not be taken for late audio");
+        assert_eq!(s.late_frames.load(Ordering::Relaxed), 0);
     }
 }

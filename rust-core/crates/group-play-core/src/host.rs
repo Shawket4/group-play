@@ -99,8 +99,9 @@ struct Shared {
     tuning: AtomicBool,
     /// Margin between capture and playout for live sources (ns). A running capture follows it.
     live_delay_ns: AtomicI64,
-    /// A live capture is running.
-    live: AtomicBool,
+    /// Live captures running (a counter: an old capture thread can still be winding down when
+    /// the next one starts).
+    live: AtomicU32,
     /// The EQ every phone applies (sent to guests as they join and on every change).
     eq: Mutex<EqSettings>,
 }
@@ -306,7 +307,7 @@ impl Host {
             self_tuned: AtomicBool::new(false),
             tuning: AtomicBool::new(false),
             live_delay_ns: AtomicI64::new(300_000_000),
-            live: AtomicBool::new(false),
+            live: AtomicU32::new(0),
             eq: Mutex::new(EqSettings::default()),
         });
         let player = Some(Player::start(local));
@@ -694,19 +695,19 @@ impl Level {
     }
 }
 
-/// Clears the host's "a live capture is running" flag however the capture ends.
-struct LiveFlag<'a>(&'a AtomicBool);
+/// Counts this capture out of the host's running live captures however it ends.
+struct LiveFlag<'a>(&'a AtomicU32);
 
 impl Drop for LiveFlag<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Relaxed);
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
 /// Live capture. Frames arrive in real time on the *capture* clock; the timeline's rate is
 /// adjusted (PI loop) so the margin between arrival and playout stays at the live delay.
 fn run_fd(mut reader: FdReader, rate: u32, label: String, shared: &Shared, stop: &AtomicBool) -> Result<()> {
-    shared.live.store(true, Ordering::Relaxed);
+    shared.live.fetch_add(1, Ordering::Relaxed);
     let _live = LiveFlag(&shared.live);
     let mut delay_ns = shared.live_delay_ns.load(Ordering::Relaxed);
     let chunk = (rate / 100).max(1) as usize; // 10 ms reads
@@ -730,7 +731,14 @@ fn run_fd(mut reader: FdReader, rate: u32, label: String, shared: &Shared, stop:
     let mut level = Level::default();
     while !stop.load(Ordering::Relaxed) {
         pcm.clear();
-        let n = reader.read_frames(&mut pcm, chunk)?;
+        let n = match reader.read_frames(&mut pcm, chunk) {
+            Ok(n) => n,
+            Err(e) => {
+                // still end the stream below, or speakers keep a timeline with no audio behind it
+                log::warn!("capture: read failed: {e:#}");
+                break;
+            }
+        };
         if n == 0 {
             log::info!("capture: stream ended");
             break;
@@ -905,11 +913,13 @@ const LOST_PER_WINDOW_MS: f64 = 60.0;
 /// keeps losing audio during a live share, give everyone more room: one step at a time, and
 /// never back down on its own (the Buffer control on the host screen can).
 async fn buffer_watch(shared: Arc<Shared>) {
-    let mut last: HashMap<String, f64> = HashMap::new();
+    // by connection, not by phone: a guest that rejoins arrives with the underruns it counted
+    // while it was cut off, which are not new losses
+    let mut last: HashMap<u64, f64> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tick.tick().await;
-        if !shared.live.load(Ordering::Relaxed) {
+        if shared.live.load(Ordering::Relaxed) == 0 {
             last.clear();
             continue;
         }
@@ -917,7 +927,7 @@ async fn buffer_watch(shared: Arc<Shared>) {
         for p in shared.peers.lock().values().filter(|p| p.connected) {
             let Some(st) = p.status.as_ref() else { continue };
             // silence the speaker actually played for lack of audio (late, dropped, or never sent)
-            let lost = st.underrun_ms - last.insert(p.id.clone(), st.underrun_ms).unwrap_or(st.underrun_ms);
+            let lost = st.underrun_ms - last.insert(p.conn, st.underrun_ms).unwrap_or(st.underrun_ms);
             if worst.as_ref().map_or(true, |(_, w)| lost > *w) {
                 worst = Some((p.name.clone(), lost));
             }
@@ -965,8 +975,13 @@ async fn media_pump(conn: Connection, shared: Arc<Shared>, peer: PeerRef) -> Res
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     // Segments stand alone; what may be lost is a timeline change, so resend it.
                     log::warn!("host: {} fell {n} messages behind, resyncing", segments.peer.name);
-                    if let (Some(b), _) = shared.snapshot() {
+                    let (start, recent) = shared.snapshot();
+                    if let Some(b) = start {
                         meta.write_all(&b).await.context("meta")?;
+                    }
+                    // what it missed and can still play (the deadline check drops the rest)
+                    for s in recent {
+                        segments.send(s).await?;
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => return Ok(()),
@@ -999,6 +1014,9 @@ impl SegmentSender {
     fn refresh_offset(&mut self, shared: &Shared) {
         if let Some(st) = shared.peers.lock().get(&self.peer.id).and_then(|p| p.status.as_ref()) {
             self.offset_ns = ((st.delay_ms - st.latency_ms) * 1e6) as i64;
+        } else if let Some(t) = shared.timings.lock().get(&self.peer.id) {
+            // before its first status: at least the delay the host gave it
+            self.offset_ns = (t.delay_ms * 1e6) as i64;
         }
     }
 

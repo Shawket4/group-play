@@ -63,7 +63,14 @@ class ShellCaptureService() : IShellCapture.Stub() {
             rec = openRecord(sampleRate, channels)
         }
         Log.i(TAG, "remote_submix media volume ${submixVolume() ?: "unknown"}/$max with the capture open")
-        val pipe = ParcelFileDescriptor.createPipe()
+        val pipe = try {
+            ParcelFileDescriptor.createPipe()
+        } catch (e: Throwable) {
+            // an open REMOTE_SUBMIX route keeps the phone's speaker silent: never leave one behind
+            try { rec.stop() } catch (_: Throwable) {}
+            rec.release()
+            throw e
+        }
         val out = FileOutputStream(pipe[1].fileDescriptor)
         record = rec
         running = true
@@ -118,7 +125,12 @@ class ShellCaptureService() : IShellCapture.Stub() {
             rec.release()
             throw IllegalStateException("AudioRecord(REMOTE_SUBMIX) not initialized")
         }
-        rec.startRecording()
+        try {
+            rec.startRecording()
+        } catch (e: Throwable) {
+            rec.release()
+            throw IllegalStateException("REMOTE_SUBMIX did not start: ${e.javaClass.simpleName}: ${e.message}")
+        }
         if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             rec.release()
             throw IllegalStateException("REMOTE_SUBMIX did not start recording")

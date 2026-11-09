@@ -53,6 +53,8 @@ pub struct PlayerShared {
     pub out_rate: AtomicU32,
     pub last_callback_ns: AtomicI64,
     pub position_frame: AtomicI64,
+    /// The stream generation `position_frame` belongs to (a new stream starts a new count).
+    pub position_generation: AtomicU64,
     pub device_name: Mutex<String>,
     pub error: Mutex<Option<String>>,
     /// The host's EQ; `eq_version` bumps on every change so the renderer picks it up.
@@ -78,6 +80,7 @@ impl PlayerShared {
             out_rate: AtomicU32::new(0),
             last_callback_ns: AtomicI64::new(0),
             position_frame: AtomicI64::new(-1),
+            position_generation: AtomicU64::new(0),
             device_name: Mutex::new(String::new()),
             error: Mutex::new(None),
             eq: Mutex::new(EqSettings::default()),
@@ -116,7 +119,16 @@ impl PlayerShared {
         r.timeline = tl;
         if new_stream {
             r.generation += 1;
+            // the old stream's play position means nothing for the new one
+            self.position_frame.store(-1, Ordering::Relaxed);
         }
+    }
+
+    /// Where the output is in the current stream, or None until it has played some of it.
+    pub fn current_position(&self) -> Option<i64> {
+        let generation = self.render.read().generation;
+        let pos = self.position_frame.load(Ordering::Relaxed);
+        (pos >= 0 && self.position_generation.load(Ordering::Relaxed) == generation).then_some(pos)
     }
 }
 
@@ -173,6 +185,7 @@ impl Renderer {
         }
         self.shared.err_ns.store(plan.err_ns as i64, Ordering::Relaxed);
         self.shared.position_frame.store(plan.start as i64, Ordering::Relaxed);
+        self.shared.position_generation.store(self.generation, Ordering::Relaxed);
         let mut missing = 0u64;
         let gain_step = (target_gain - self.gain) / n.max(1) as f32;
         self.shared.ring.with_reader(|rd| {

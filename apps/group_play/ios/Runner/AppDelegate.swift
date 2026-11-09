@@ -11,8 +11,9 @@ import UIKit
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     // Group Play is a speaker: play through the silent switch and keep playing in the background
-    // (Info.plist UIBackgroundModes = audio). cpal does not set the category itself.
-    GroupPlayAudioSession.configure()
+    // (Info.plist UIBackgroundModes = audio). cpal does not set the category itself. Not activated
+    // until a session starts, so opening the app doesn't stop the music already playing.
+    GroupPlayAudioSession.configure(activate: false)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -27,14 +28,14 @@ import UIKit
 enum GroupPlayAudioSession {
   private static var observing = false
 
-  static func configure() {
+  static func configure(activate: Bool) {
     let session = AVAudioSession.sharedInstance()
     do {
       // Not mixable on purpose: a non-mixable playback session with Now Playing info is what makes
       // iOS treat Group Play as a music app (lock screen, Control Center, Dynamic Island) and keep
       // it running in the background. Interruptions are handled below.
       try session.setCategory(.playback, mode: .default, options: [])
-      try session.setActive(true)
+      if activate { try session.setActive(true) }
     } catch {
       NSLog("group-play: audio session setup failed: \(error)")
     }
@@ -51,18 +52,18 @@ enum GroupPlayAudioSession {
       let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
       let ended = raw.flatMap(AVAudioSession.InterruptionType.init) == .ended
       NSLog("group-play: audio interruption \(ended ? "ended" : "began")")
-      if ended { reactivate() }
+      if ended && GroupPlayNowPlaying.active { reactivate() }
     }
     nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { _ in
       NSLog("group-play: media services were reset")
-      configure()
+      configure(activate: GroupPlayNowPlaying.active)
     }
     nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
       NSLog("group-play: entered background")
     }
     nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { _ in
       NSLog("group-play: entering foreground")
-      reactivate()
+      if GroupPlayNowPlaying.active { reactivate() }
     }
   }
 
@@ -91,6 +92,8 @@ enum GroupPlayAudioSession {
 /// ("remoteCommand"), which mutes or unmutes this phone; nothing here can seek (it's live).
 enum GroupPlayNowPlaying {
   static var channel: FlutterMethodChannel?
+  /// In a session: the audio session is ours and the player is up.
+  private(set) static var active = false
   private static var commandsReady = false
 
   private static let artwork: MPMediaItemArtwork? = {
@@ -101,9 +104,20 @@ enum GroupPlayNowPlaying {
   static func update(_ args: [String: Any]) {
     guard args["active"] as? Bool == true else {
       MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+      if active {
+        // Out of the session: no controls, and give the audio back so other apps' music resumes.
+        active = false
+        setCommandsEnabled(false)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      }
       return
     }
+    if !active {
+      active = true
+      try? AVAudioSession.sharedInstance().setActive(true)
+    }
     setUpCommands()
+    setCommandsEnabled(true)
     var info: [String: Any] = [
       MPMediaItemPropertyTitle: args["title"] as? String ?? "Group Play",
       MPMediaItemPropertyArtist: args["subtitle"] as? String ?? "",
@@ -112,6 +126,13 @@ enum GroupPlayNowPlaying {
     ]
     if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
     MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+  }
+
+  private static func setCommandsEnabled(_ on: Bool) {
+    let cc = MPRemoteCommandCenter.shared()
+    cc.playCommand.isEnabled = on
+    cc.pauseCommand.isEnabled = on
+    cc.togglePlayPauseCommand.isEnabled = on
   }
 
   private static func setUpCommands() {
@@ -144,7 +165,7 @@ enum GroupPlayIOSChannel {
         GroupPlayNowPlaying.update(call.arguments as? [String: Any] ?? [:])
         result(nil)
       case "configureAudio":
-        GroupPlayAudioSession.configure()
+        GroupPlayAudioSession.configure(activate: GroupPlayNowPlaying.active)
         result(GroupPlayAudioSession.info())
       case "audioInfo":
         result(GroupPlayAudioSession.info())
@@ -271,6 +292,6 @@ enum GroupPlayMic {
       close(writeFd)
       writeFd = -1
     }
-    GroupPlayAudioSession.configure()
+    GroupPlayAudioSession.configure(activate: GroupPlayNowPlaying.active)
   }
 }

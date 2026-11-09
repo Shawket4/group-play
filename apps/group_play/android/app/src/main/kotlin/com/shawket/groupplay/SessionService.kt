@@ -64,6 +64,7 @@ class SessionService : Service() {
     // stays out of power save (its wake-ups add 100+ ms of jitter, which reads as dropouts).
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var wifiLockScreenOff: WifiManager.WifiLock? = null
 
     @SuppressLint("WakelockTimeout")
     private fun holdLocks() {
@@ -73,11 +74,18 @@ class SessionService : Service() {
                 .apply { setReferenceCounted(false); acquire() }
         }
         if (wifiLock == null) {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            // LOW_LATENCY only holds with the screen on and this app in front; HIGH_PERF covers
+            // the rest on Android 10-13. From 14 HIGH_PERF is folded into LOW_LATENCY, so a locked
+            // phone gets no Wi-Fi lock at all: the live buffer's auto-raise is what rides that out.
             @Suppress("DEPRECATION")
             val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else WifiManager.WIFI_MODE_FULL_HIGH_PERF
-            wifiLock = (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
-                .createWifiLock(mode, "GroupPlay:session")
-                .apply { setReferenceCounted(false); acquire() }
+            wifiLock = wm.createWifiLock(mode, "GroupPlay:session").apply { setReferenceCounted(false); acquire() }
+            if (Build.VERSION.SDK_INT in 29..33) {
+                @Suppress("DEPRECATION")
+                wifiLockScreenOff = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "GroupPlay:screen-off")
+                    .apply { setReferenceCounted(false); acquire() }
+            }
         }
     }
 
@@ -86,6 +94,8 @@ class SessionService : Service() {
         wakeLock = null
         wifiLock?.let { if (it.isHeld) it.release() }
         wifiLock = null
+        wifiLockScreenOff?.let { if (it.isHeld) it.release() }
+        wifiLockScreenOff = null
     }
 
     private fun startForegroundCompat(title: String, text: String, projection: Boolean) {

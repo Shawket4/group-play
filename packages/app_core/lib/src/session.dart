@@ -90,17 +90,17 @@ class SessionController extends Notifier<SessionState> {
       if (s == null) return;
       unawaited(_remember(s));
       if (IosNative.available) _showNowPlaying(s);
-      // the engine raises the live buffer by itself when speakers lose audio: follow it
-      if (s.role == 'host' && !_draggingDelay && s.playoutDelayMs != 0 && s.playoutDelayMs != state.playoutDelayMs) {
+      // the engine only ever raises the live buffer (when speakers lose audio): follow it up
+      if (s.role == 'host' && !_draggingDelay && s.playoutDelayMs > state.playoutDelayMs) {
         state = state.copyWith(playoutDelayMs: s.playoutDelayMs);
       }
+      _watchCaptureEnded(s);
     });
     return const SessionState();
   }
 
   // ------------------------------------------------------------------ iOS Now Playing
 
-  bool _muted = false;
   String? _nowPlaying;
 
   /// Keeps the lock-screen / Dynamic Island player in step with the session. iOS only treats
@@ -112,25 +112,51 @@ class SessionController extends Notifier<SessionState> {
     final subtitle = s.role == 'host'
         ? 'Group Play · $speakers speaker${speakers == 1 ? '' : 's'}'
         : 'Group Play · with ${s.hostName}';
-    final key = '$active|$title|$subtitle|$_muted';
+    final playing = s.local.volume > 0;
+    final key = '$active|$title|$subtitle|$playing';
     if (key == _nowPlaying) return;
     _nowPlaying = key;
-    unawaited(_quietly(() => IosNative.setNowPlaying(active: active, title: title, subtitle: subtitle, playing: !_muted)));
+    unawaited(_quietly(() => IosNative.setNowPlaying(active: active, title: title, subtitle: subtitle, playing: playing)));
   }
 
-  /// Pause/play on the lock screen, Control Center or Dynamic Island: mutes or unmutes this phone
-  /// (the session and the others keep going).
+  /// Pause/play on the lock screen, Control Center, Dynamic Island or AirPods: mutes or unmutes
+  /// this phone (the session and the others keep going). Muted = the engine's volume is 0, so the
+  /// in-app volume slider and this never disagree.
   void _onRemoteCommand(String command) {
+    final s = ref.read(engineStatusProvider).value;
+    // nothing to pause outside a session, and a mute must not carry into the next one
+    if (s == null || s.role == 'idle') return;
     final mute = switch (command) {
       'pause' => true,
       'play' => false,
-      _ => !_muted,
+      _ => s.local.volume > 0,
     };
-    _muted = mute;
     final volume = mute ? 0.0 : ref.read(deviceSettingsProvider).volume;
     unawaited(_quietly(() => rust.setVolume(volume: volume)));
-    final s = ref.read(engineStatusProvider).value;
-    if (s != null) _showNowPlaying(s);
+  }
+
+  int _captureGoneTicks = 0;
+
+  /// A capture can end on its own (a read error, the phone locking) without Shizuku dying: the
+  /// engine's stream goes away while the session still says it is sharing. After a second of
+  /// that, treat it as a stopped capture (which picks full sharing back up).
+  void _watchCaptureEnded(rust.EngineStatus s) {
+    final gone = state.capturing && state.pending == null && s.role == 'host' && s.source == null;
+    _captureGoneTicks = gone ? _captureGoneTicks + 1 : 0;
+    if (_captureGoneTicks < 4) return;
+    _captureGoneTicks = 0;
+    _captureEnded('the capture ended');
+  }
+
+  void _captureEnded(String reason) {
+    if (!state.capturing) return;
+    // Full sharing dies with Shizuku (locking the phone can take it down): pick it back up as
+    // soon as Shizuku is running again, now if it still is.
+    _resumeFullShare = state.source == SourceKind.captureFull;
+    state = state.copyWith(source: SourceKind.none);
+    unawaited(_restoreHostLocal());
+    _alerts.show('Sharing stopped: $reason', tone: GPTone.warn);
+    unawaited(_resumeFullShareIfReady());
   }
 
   Alerts get _alerts => ref.read(alertsProvider.notifier);
@@ -154,15 +180,7 @@ class SessionController extends Notifier<SessionState> {
   void _onAndroidEvent(AndroidEvent e) {
     switch (e.type) {
       case 'captureStopped':
-        if (state.capturing) {
-          // Full sharing dies with Shizuku (locking the phone can take it down): pick it back up
-          // as soon as Shizuku is running again, now if it still is.
-          _resumeFullShare = state.source == SourceKind.captureFull;
-          state = state.copyWith(source: SourceKind.none);
-          unawaited(_restoreHostLocal());
-          _alerts.show('Sharing stopped: ${e.data['reason'] ?? 'unknown reason'}', tone: GPTone.warn);
-          unawaited(_resumeFullShareIfReady());
-        }
+        _captureEnded('${e.data['reason'] ?? 'unknown reason'}');
       case 'shizuku':
         if (e.data['running'] == true && e.data['permission'] == true) unawaited(_resumeFullShareIfReady());
       case 'hotspotStopped':
@@ -232,10 +250,10 @@ class SessionController extends Notifier<SessionState> {
     if (state.hotspot != null) {
       await _quietly(AndroidNative.stopLocalHotspot);
     }
-    await rust.leave();
-    if (_muted) {
+    try {
+      await rust.leave();
+    } finally {
       // muted from the lock screen: the next session starts at this phone's volume again
-      _muted = false;
       await _quietly(() => rust.setVolume(volume: ref.read(deviceSettingsProvider).volume));
     }
     await _memory.forget();
@@ -312,9 +330,12 @@ class SessionController extends Notifier<SessionState> {
   /// Restarts full sharing that Shizuku's death cut off, once Shizuku is ready again. One try
   /// per call; choosing another source or leaving cancels it.
   Future<void> _resumeFullShareIfReady() async {
-    if (!_resumeFullShare || ref.read(sessionRoleProvider) != SessionRole.host) return;
-    if (state.pending != null || state.source != SourceKind.none) return;
+    bool ready() =>
+        _resumeFullShare && ref.read(sessionRoleProvider) == SessionRole.host && state.pending == null && state.source == SourceKind.none;
+    if (!ready()) return;
     if (await fullCaptureBlocker() != null) return;
+    // the person picked something else meanwhile, or another event got here first
+    if (!ready()) return;
     _resumeFullShare = false;
     if (await _startCapture(CaptureMode.output)) _alerts.show('Sharing resumed');
   }

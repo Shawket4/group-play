@@ -57,7 +57,11 @@ object NetHelpers {
                 override fun onStarted(r: WifiManager.LocalOnlyHotspotReservation) {
                     reservation = r
                     // the interface gets its address a moment after onStarted
-                    main.postDelayed({ answer(Result.success(describe(r))) }, 600)
+                    main.postDelayed({
+                        // it may have stopped or failed during the wait: don't hand out a dead hotspot
+                        if (reservation === r) answer(Result.success(describe(r)))
+                        else answer(Result.failure(IllegalStateException("The hotspot stopped right after starting")))
+                    }, 600)
                 }
 
                 override fun onStopped() {
@@ -79,6 +83,9 @@ object NetHelpers {
                         reservation = null
                         onHotspotStopped?.invoke()
                     } else {
+                        // failed in the moment after onStarted: drop the reservation, or the next start reuses it
+                        try { reservation?.close() } catch (_: Throwable) {}
+                        reservation = null
                         answer(Result.failure(IllegalStateException("Hotspot failed: $why")))
                     }
                 }
