@@ -81,14 +81,12 @@ class JoinScreen extends ConsumerWidget {
                 textAlign: TextAlign.center,
                 style: GPText.subheadline.copyWith(color: secondary),
               ),
-              const SizedBox(height: GPSpace.xs),
-              CupertinoButton(
-                minimumSize: const Size(GPSize.minTap, GPSize.minTap),
+              const SizedBox(height: GPSpace.md),
+              GPButton(
+                label: 'Paste a Code',
+                icon: CupertinoIcons.doc_on_clipboard,
+                style: GPButtonStyle.secondary,
                 onPressed: flow.phase == JoinPhase.scanning ? n.pasteFromClipboard : null,
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [Icon(CupertinoIcons.doc_on_clipboard, size: 18), SizedBox(width: 6), Text('Paste a Code')],
-                ),
               ),
             ],
           ),

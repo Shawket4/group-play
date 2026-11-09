@@ -13,7 +13,7 @@ import 'package:rust_bridge/rust_bridge.dart';
 
 ({String label, GPTone tone}) peerQuality(PeerStatus p) {
   if (!p.connected) return (label: 'Left', tone: GPTone.bad);
-  return syncQuality(synced: p.rttMs > 0, playing: p.playing, errMs: p.errMs);
+  return syncQuality(synced: p.syncRttMs > 0, playing: p.playing, errMs: p.errMs);
 }
 
 String formatMs(double v, {int digits = 1}) => '${v.toStringAsFixed(digits)} ms';

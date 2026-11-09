@@ -10,7 +10,7 @@ enum GPButtonStyle {
   /// Ink fill, paper label: the one primary action on a screen.
   filled,
 
-  /// Sunk-grey fill, ink label: secondary actions.
+  /// Hairline ink outline on paper: secondary actions.
   secondary,
 
   /// Pale red fill, red label: destructive actions.
@@ -39,7 +39,7 @@ class GPButton extends StatelessWidget {
     final enabled = onPressed != null && !busy;
     final (bg, fg) = switch (style) {
       GPButtonStyle.filled => (GPColors.of(context, GPColors.ink), GPColors.of(context, GPColors.onInk)),
-      GPButtonStyle.secondary => (GPColors.of(context, GPColors.fill), GPColors.of(context, GPColors.ink)),
+      GPButtonStyle.secondary => (GPColors.of(context, GPColors.surface), GPColors.of(context, GPColors.ink)),
       GPButtonStyle.destructive => (GPColors.of(context, GPColors.badBg), GPColors.of(context, GPColors.bad)),
     };
     return Semantics(
@@ -61,7 +61,11 @@ class GPButton extends StatelessWidget {
           child: Container(
             height: GPSize.button,
             width: double.infinity,
-            decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(GPRadius.button)),
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(GPRadius.button),
+              border: style == GPButtonStyle.secondary ? Border.all(color: fg, width: 1.2) : null,
+            ),
             alignment: Alignment.center,
             child: busy
                 ? CupertinoActivityIndicator(color: fg)

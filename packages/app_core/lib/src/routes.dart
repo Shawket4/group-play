@@ -14,6 +14,7 @@ abstract final class Routes {
   /// (`groupplay://app/join?t=GPLAY1:…`). Scanned in-app or by the phone's camera.
   static String joinLink(String ticket) => 'groupplay://app/join?t=$ticket';
   static const speaker = '/speaker';
+  static const speakerDetails = '/speaker/details';
   static const settings = '/settings';
   static const settingsName = '/settings/name';
   static const settingsCapture = '/settings/capture';

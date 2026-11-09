@@ -250,7 +250,12 @@ class PeerStatus {
 
   /// "direct" or "relay"
   final String path;
+
+  /// Round trip of the network path (what "Direct · 4 ms" shows).
   final double rttMs;
+
+  /// Best clock-sync round trip; half of it is the sync accuracy.
+  final double syncRttMs;
   final double syncOffsetMs;
   final double skewPpm;
   final double bufferMs;
@@ -270,6 +275,7 @@ class PeerStatus {
     required this.connected,
     required this.path,
     required this.rttMs,
+    required this.syncRttMs,
     required this.syncOffsetMs,
     required this.skewPpm,
     required this.bufferMs,
@@ -291,6 +297,7 @@ class PeerStatus {
       connected.hashCode ^
       path.hashCode ^
       rttMs.hashCode ^
+      syncRttMs.hashCode ^
       syncOffsetMs.hashCode ^
       skewPpm.hashCode ^
       bufferMs.hashCode ^
@@ -314,6 +321,7 @@ class PeerStatus {
           connected == other.connected &&
           path == other.path &&
           rttMs == other.rttMs &&
+          syncRttMs == other.syncRttMs &&
           syncOffsetMs == other.syncOffsetMs &&
           skewPpm == other.skewPpm &&
           bufferMs == other.bufferMs &&

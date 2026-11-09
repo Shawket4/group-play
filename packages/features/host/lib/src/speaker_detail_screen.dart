@@ -7,7 +7,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:rust_bridge/rust_bridge.dart';
 
-/// One speaker, seen from the host: timing, volume, link and sync details.
+/// One speaker, seen from the host: its lock, its calibration, its details.
 /// `id == Routes.localSpeakerId` is the host phone itself.
 class SpeakerDetailScreen extends ConsumerWidget {
   const SpeakerDetailScreen({required this.id, super.key});
@@ -17,7 +17,9 @@ class SpeakerDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(engineStatusProvider).value;
-    if (status == null) return const CupertinoPageScaffold(child: Center(child: CupertinoActivityIndicator()));
+    if (status == null) {
+      return const CupertinoPageScaffold(backgroundColor: GPColors.background, child: Center(child: CupertinoActivityIndicator()));
+    }
     if (id == Routes.localSpeakerId) return _LocalDetail(status: status);
     final peer = status.peers.where((p) => p.id == id).firstOrNull;
     if (peer == null) {
@@ -27,14 +29,67 @@ class SpeakerDetailScreen extends ConsumerWidget {
         slivers: [SliverToBoxAdapter(child: GPEmptyState(icon: CupertinoIcons.speaker_2_fill, title: 'This speaker left'))],
       );
     }
-    return _PeerDetail(peer: peer);
+    return _PeerDetail(peer: peer, source: status.source);
+  }
+}
+
+class _CalibrationCard extends StatelessWidget {
+  const _CalibrationCard({required this.label, required this.delayMs, required this.volume, required this.onDelay, required this.onVolume, this.onDelayEnd, this.onVolumeEnd});
+
+  final String label;
+  final double delayMs;
+  final double volume;
+  final ValueChanged<double> onDelay;
+  final ValueChanged<double> onVolume;
+  final ValueChanged<double>? onDelayEnd;
+  final ValueChanged<double>? onVolumeEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GPSectionLabel(label),
+        GPCard(
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              GPSliderCell(
+                label: 'Timing',
+                value: delayMs,
+                min: -200,
+                max: 200,
+                step: 1,
+                format: formatSignedMs,
+                hint: 'Early compared with the others? Add delay. Late? Take some away.',
+                onChanged: onDelay,
+                onChangeEnd: onDelayEnd,
+              ),
+              const GPRule(indent: GPSpace.md),
+              GPSliderCell(
+                label: 'Volume',
+                value: volume,
+                min: 0,
+                max: 1,
+                format: formatPercent,
+                minIcon: CupertinoIcons.speaker_fill,
+                maxIcon: CupertinoIcons.speaker_3_fill,
+                onChanged: onVolume,
+                onChangeEnd: onVolumeEnd,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }
 
 class _PeerDetail extends ConsumerWidget {
-  const _PeerDetail({required this.peer});
+  const _PeerDetail({required this.peer, required this.source});
 
   final PeerStatus peer;
+  final String? source;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -48,49 +103,40 @@ class _PeerDetail extends ConsumerWidget {
       title: peer.name,
       previousPageTitle: 'Hosting',
       slivers: [
-        GPSection(
-          children: [
-            GPRow(title: 'Status', trailing: GPBadge(q.label, tone: q.tone)),
-            GPRow(title: 'Link', value: peer.connected ? linkLabel(peer.path, peer.rttMs) : 'Disconnected'),
-          ],
+        GPBlock(
+          child: GPSyncCard(
+            label: q.label,
+            tone: q.tone,
+            caption: peer.connected ? (source ?? 'Nothing playing') : 'Disconnected',
+            errorMs: peer.errMs,
+            active: peer.connected && peer.playing,
+            badges: [
+              if (peer.connected) GPBadge(linkLabel(peer.path, peer.rttMs), icon: CupertinoIcons.wifi),
+              GPBadge(peer.platform == 'ios' ? 'iPhone' : (peer.platform == 'android' ? 'Android' : peer.platform), icon: CupertinoIcons.device_phone_portrait),
+            ],
+          ),
         ),
-        GPSection(
-          header: 'Calibration',
-          footer: 'Sounds early compared with the others? Add delay. Late? Take some away.',
-          children: [
-            GPSliderCell(
-              label: 'Timing',
-              value: drafts[delayKey] ?? peer.delayMs,
-              min: -200,
-              max: 200,
-              step: 1,
-              format: formatSignedMs,
-              onChanged: (v) {
-                d.set(delayKey, v);
-                unawaited(n.setPeerDelay(peer.id, v));
-              },
-              onChangeEnd: (_) => d.release(delayKey),
-            ),
-            GPSliderCell(
-              label: 'Volume',
-              value: drafts[volKey] ?? peer.volume,
-              min: 0,
-              max: 1,
-              format: formatPercent,
-              minIcon: CupertinoIcons.speaker_fill,
-              maxIcon: CupertinoIcons.speaker_3_fill,
-              onChanged: (v) {
-                d.set(volKey, v);
-                unawaited(n.setPeerVolume(peer.id, v));
-              },
-              onChangeEnd: (_) => d.release(volKey),
-            ),
-          ],
+        GPBlock(
+          child: _CalibrationCard(
+            label: 'Calibration',
+            delayMs: drafts[delayKey] ?? peer.delayMs,
+            volume: drafts[volKey] ?? peer.volume,
+            onDelay: (v) {
+              d.set(delayKey, v);
+              unawaited(n.setPeerDelay(peer.id, v));
+            },
+            onDelayEnd: (_) => d.release(delayKey),
+            onVolume: (v) {
+              d.set(volKey, v);
+              unawaited(n.setPeerVolume(peer.id, v));
+            },
+            onVolumeEnd: (_) => d.release(volKey),
+          ),
         ),
         GPSection(
           header: 'Details',
           children: [
-            GPRow(title: 'Sync accuracy', figure: true, value: '±${formatMs(peer.rttMs / 2, digits: 2)}'),
+            GPRow(title: 'Sync accuracy', figure: true, value: '±${formatMs(peer.syncRttMs / 2, digits: 2)}'),
             GPRow(title: 'Clock drift', figure: true, value: '${peer.skewPpm.toStringAsFixed(1)} ppm'),
             GPRow(title: 'Lock error', figure: true, value: formatMs(peer.errMs, digits: 2)),
             GPRow(title: 'Buffered', figure: true, value: formatMs(peer.bufferMs, digits: 0)),
@@ -117,7 +163,7 @@ class _LocalDetail extends ConsumerWidget {
     final capturing = ref.watch(sessionProvider.select((x) => x.capturing));
     final l = status.local;
     return GPPage(
-      title: 'This Phone',
+      title: settings.name,
       previousPageTitle: 'Hosting',
       slivers: [
         GPSection(
@@ -133,30 +179,14 @@ class _LocalDetail extends ConsumerWidget {
             ),
           ],
         ),
-        GPSection(
-          header: 'Calibration',
-          footer: 'Sounds early compared with the others? Add delay. Late? Take some away.',
-          children: [
-            GPSliderCell(
-              label: 'Timing',
-              value: settings.delayMs,
-              min: -200,
-              max: 200,
-              step: 1,
-              format: formatSignedMs,
-              onChanged: (v) => unawaited(s.setDelay(v)),
-            ),
-            GPSliderCell(
-              label: 'Volume',
-              value: settings.volume,
-              min: 0,
-              max: 1,
-              format: formatPercent,
-              minIcon: CupertinoIcons.speaker_fill,
-              maxIcon: CupertinoIcons.speaker_3_fill,
-              onChanged: (v) => unawaited(s.setVolumeLevel(v)),
-            ),
-          ],
+        GPBlock(
+          child: _CalibrationCard(
+            label: 'This phone',
+            delayMs: settings.delayMs,
+            volume: settings.volume,
+            onDelay: (v) => unawaited(s.setDelay(v)),
+            onVolume: (v) => unawaited(s.setVolumeLevel(v)),
+          ),
         ),
         GPSection(
           header: 'Details',

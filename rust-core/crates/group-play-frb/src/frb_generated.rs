@@ -991,6 +991,7 @@ impl SseDecode for crate::api::engine::PeerStatus {
         let mut var_connected = <bool>::sse_decode(deserializer);
         let mut var_path = <String>::sse_decode(deserializer);
         let mut var_rttMs = <f64>::sse_decode(deserializer);
+        let mut var_syncRttMs = <f64>::sse_decode(deserializer);
         let mut var_syncOffsetMs = <f64>::sse_decode(deserializer);
         let mut var_skewPpm = <f64>::sse_decode(deserializer);
         let mut var_bufferMs = <f64>::sse_decode(deserializer);
@@ -1009,6 +1010,7 @@ impl SseDecode for crate::api::engine::PeerStatus {
             connected: var_connected,
             path: var_path,
             rtt_ms: var_rttMs,
+            sync_rtt_ms: var_syncRttMs,
             sync_offset_ms: var_syncOffsetMs,
             skew_ppm: var_skewPpm,
             buffer_ms: var_bufferMs,
@@ -1200,6 +1202,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::PeerStatus {
             self.connected.into_into_dart().into_dart(),
             self.path.into_into_dart().into_dart(),
             self.rtt_ms.into_into_dart().into_dart(),
+            self.sync_rtt_ms.into_into_dart().into_dart(),
             self.sync_offset_ms.into_into_dart().into_dart(),
             self.skew_ppm.into_into_dart().into_dart(),
             self.buffer_ms.into_into_dart().into_dart(),
@@ -1392,6 +1395,7 @@ impl SseEncode for crate::api::engine::PeerStatus {
         <bool>::sse_encode(self.connected, serializer);
         <String>::sse_encode(self.path, serializer);
         <f64>::sse_encode(self.rtt_ms, serializer);
+        <f64>::sse_encode(self.sync_rtt_ms, serializer);
         <f64>::sse_encode(self.sync_offset_ms, serializer);
         <f64>::sse_encode(self.skew_ppm, serializer);
         <f64>::sse_encode(self.buffer_ms, serializer);

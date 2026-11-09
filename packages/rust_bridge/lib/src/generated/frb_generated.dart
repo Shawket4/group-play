@@ -878,8 +878,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PeerStatus dco_decode_peer_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 17)
-      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
+    if (arr.length != 18)
+      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
     return PeerStatus(
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
@@ -887,17 +887,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       connected: dco_decode_bool(arr[3]),
       path: dco_decode_String(arr[4]),
       rttMs: dco_decode_f_64(arr[5]),
-      syncOffsetMs: dco_decode_f_64(arr[6]),
-      skewPpm: dco_decode_f_64(arr[7]),
-      bufferMs: dco_decode_f_64(arr[8]),
-      underrunMs: dco_decode_f_64(arr[9]),
-      latencyMs: dco_decode_f_64(arr[10]),
-      errMs: dco_decode_f_64(arr[11]),
-      delayMs: dco_decode_f_64(arr[12]),
-      volume: dco_decode_f_64(arr[13]),
-      output: dco_decode_String(arr[14]),
-      playing: dco_decode_bool(arr[15]),
-      jumps: dco_decode_u_64(arr[16]),
+      syncRttMs: dco_decode_f_64(arr[6]),
+      syncOffsetMs: dco_decode_f_64(arr[7]),
+      skewPpm: dco_decode_f_64(arr[8]),
+      bufferMs: dco_decode_f_64(arr[9]),
+      underrunMs: dco_decode_f_64(arr[10]),
+      latencyMs: dco_decode_f_64(arr[11]),
+      errMs: dco_decode_f_64(arr[12]),
+      delayMs: dco_decode_f_64(arr[13]),
+      volume: dco_decode_f_64(arr[14]),
+      output: dco_decode_String(arr[15]),
+      playing: dco_decode_bool(arr[16]),
+      jumps: dco_decode_u_64(arr[17]),
     );
   }
 
@@ -1111,6 +1112,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_connected = sse_decode_bool(deserializer);
     var var_path = sse_decode_String(deserializer);
     var var_rttMs = sse_decode_f_64(deserializer);
+    var var_syncRttMs = sse_decode_f_64(deserializer);
     var var_syncOffsetMs = sse_decode_f_64(deserializer);
     var var_skewPpm = sse_decode_f_64(deserializer);
     var var_bufferMs = sse_decode_f_64(deserializer);
@@ -1129,6 +1131,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       connected: var_connected,
       path: var_path,
       rttMs: var_rttMs,
+      syncRttMs: var_syncRttMs,
       syncOffsetMs: var_syncOffsetMs,
       skewPpm: var_skewPpm,
       bufferMs: var_bufferMs,
@@ -1339,6 +1342,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.connected, serializer);
     sse_encode_String(self.path, serializer);
     sse_encode_f_64(self.rttMs, serializer);
+    sse_encode_f_64(self.syncRttMs, serializer);
     sse_encode_f_64(self.syncOffsetMs, serializer);
     sse_encode_f_64(self.skewPpm, serializer);
     sse_encode_f_64(self.bufferMs, serializer);

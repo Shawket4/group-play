@@ -23,7 +23,7 @@ abstract final class GPRadius {
   static const double tile = 7;
 
   /// Buttons.
-  static const double button = 12;
+  static const double button = 14;
 }
 
 abstract final class GPSize {
@@ -34,5 +34,5 @@ abstract final class GPSize {
   static const double tile = 29;
 
   /// Filled button height.
-  static const double button = 50;
+  static const double button = 54;
 }

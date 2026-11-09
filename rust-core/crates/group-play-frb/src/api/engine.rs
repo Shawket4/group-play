@@ -14,7 +14,10 @@ pub struct PeerStatus {
     pub connected: bool,
     /// "direct" or "relay"
     pub path: String,
+    /// Round trip of the network path (what "Direct · 4 ms" shows).
     pub rtt_ms: f64,
+    /// Best clock-sync round trip; half of it is the sync accuracy.
+    pub sync_rtt_ms: f64,
     pub sync_offset_ms: f64,
     pub skew_ppm: f64,
     pub buffer_ms: f64,
@@ -417,7 +420,8 @@ async fn snapshot() -> EngineStatus {
                             platform: p.platform,
                             connected: p.connected,
                             path: p.path,
-                            rtt_ms: if st.rtt_ms > 0.0 { st.rtt_ms } else { p.path_rtt_ms },
+                            rtt_ms: p.path_rtt_ms,
+                            sync_rtt_ms: st.rtt_ms,
                             sync_offset_ms: st.sync_offset_ms,
                             skew_ppm: st.skew_ppm,
                             buffer_ms: st.buffer_ms,
