@@ -32,6 +32,8 @@ pub struct PeerStatus {
     pub output: String,
     pub playing: bool,
     pub jumps: u64,
+    /// Audio that arrived too late to play or that the host gave up sending (ms, cumulative).
+    pub late_ms: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +45,8 @@ pub struct LocalStatus {
     pub err_ms: f64,
     pub buffer_ms: f64,
     pub underrun_ms: f64,
+    /// Guest: audio that arrived too late to play or that the host gave up sending (ms).
+    pub late_ms: f64,
     pub jumps: u64,
     /// Host: this phone's own delay. Guest: the delay the host gave it. ms.
     pub delay_ms: f64,
@@ -73,6 +77,8 @@ pub struct EngineStatus {
     pub path_rtt_ms: f64,
     pub source: Option<String>,
     pub stream_rate: u32,
+    /// Host: live sources' buffer (ms); it can go up on its own when speakers lose audio.
+    pub playout_delay_ms: u32,
     pub peers: Vec<PeerStatus>,
     pub local: LocalStatus,
     pub ended_reason: Option<String>,
@@ -247,7 +253,7 @@ pub async fn stop_source() -> Result<()> {
     .await
 }
 
-/// Margin between capture and playout for live sources (next capture start). Default 300 ms.
+/// Margin between capture and playout for live sources; a running capture moves to it at once. Default 300 ms.
 pub async fn set_playout_delay_ms(ms: u32) -> Result<()> {
     with_host(move |h| {
         h.set_playout_delay_ms(ms);
@@ -441,6 +447,7 @@ fn local_status(l: &engine::player::PlayerShared, stream_rate: u32, sync: Option
         err_ms: l.err_ns.load(Ordering::Relaxed) as f64 / 1e6,
         buffer_ms: if pos >= 0 { (l.ring.highest() as f64 - pos as f64) / rate * 1000.0 } else { 0.0 },
         underrun_ms: l.underrun_frames.load(Ordering::Relaxed) as f64 / out_rate.max(1) as f64 * 1000.0,
+        late_ms: 0.0,
         jumps: l.jumps.load(Ordering::Relaxed),
         delay_ms: l.total_delay_ns() as f64 / 1e6,
         tuned: false,
@@ -470,6 +477,7 @@ async fn snapshot() -> EngineStatus {
             path_rtt_ms: 0.0,
             source: None,
             stream_rate: 0,
+            playout_delay_ms: 0,
             peers: vec![],
             local: LocalStatus {
                 output: String::new(),
@@ -479,6 +487,7 @@ async fn snapshot() -> EngineStatus {
                 err_ms: 0.0,
                 buffer_ms: 0.0,
                 underrun_ms: 0.0,
+                late_ms: 0.0,
                 jumps: 0,
                 delay_ms: 0.0,
                 tuned: false,
@@ -506,6 +515,7 @@ async fn snapshot() -> EngineStatus {
                 path_rtt_ms: 0.0,
                 source: s.source,
                 stream_rate: s.sample_rate,
+                playout_delay_ms: h.playout_delay_ms(),
                 peers: s
                     .peers
                     .into_iter()
@@ -523,6 +533,7 @@ async fn snapshot() -> EngineStatus {
                             output: String::new(),
                             playing: false,
                             jumps: 0,
+                            late_ms: 0.0,
                         });
                         PeerStatus {
                             id: p.id,
@@ -544,6 +555,7 @@ async fn snapshot() -> EngineStatus {
                             output: st.output,
                             playing: st.playing,
                             jumps: st.jumps,
+                            late_ms: st.late_ms,
                         }
                     })
                     .collect(),
@@ -564,8 +576,9 @@ async fn snapshot() -> EngineStatus {
                 path_rtt_ms: v.path_rtt_ms,
                 source: v.source.clone(),
                 stream_rate: v.sample_rate,
+                playout_delay_ms: 0,
                 peers: vec![],
-                local: local_status(g.local(), v.sample_rate, Some(v.sync)),
+                local: LocalStatus { late_ms: engine::guest::guest_status(g).late_ms, ..local_status(g.local(), v.sample_rate, Some(v.sync)) },
                 ended_reason: v.kicked.clone(),
                 last_error,
             }

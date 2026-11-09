@@ -4,7 +4,7 @@
 use super::clock::now_ns;
 use super::net;
 use super::player::{Player, PlayerShared};
-use super::proto::{self, Dgram, GuestMsg, GuestStatus, HostMsg, Media, PROTOCOL_VERSION};
+use super::proto::{self, Dgram, GuestMsg, GuestStatus, HostMsg, Media, SegmentHeader, PROTOCOL_VERSION};
 use super::ring::PcmRing;
 use super::sync::{ClockEstimate, ClockSync, SyncSample};
 use super::ticket::Ticket;
@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 use iroh::Endpoint;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,11 +33,23 @@ pub struct GuestView {
     pub host_ticket: Option<String>,
 }
 
+/// Segments of a stream whose StreamStart has not arrived yet, kept at most this many
+/// (streams are not ordered with each other, so a segment can beat its own StreamStart).
+const MAX_EARLY_SEGMENTS: usize = 256;
+
+#[derive(Default)]
+struct MediaState {
+    stream_id: Option<u32>,
+    early: Vec<(SegmentHeader, Vec<u8>)>,
+}
+
 struct Shared {
     view: Mutex<GuestView>,
     sync: Mutex<ClockSync>,
     local: Arc<PlayerShared>,
-    stream_id: Mutex<Option<u32>>,
+    media: Mutex<MediaState>,
+    /// Frames that arrived too late to play, or that the host gave up sending.
+    late_frames: AtomicU64,
     stop: AtomicBool,
     /// The host went away on purpose (ended the session, closed the app): wait for it.
     host_away: AtomicBool,
@@ -66,7 +78,8 @@ impl Guest {
             view: Mutex::new(GuestView { state: "connecting".into(), host_name: ticket.host_name.clone(), ..Default::default() }),
             sync: Mutex::new(ClockSync::new()),
             local: local.clone(),
-            stream_id: Mutex::new(None),
+            media: Mutex::new(MediaState::default()),
+            late_frames: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             host_away: AtomicBool::new(wait),
             name,
@@ -117,7 +130,7 @@ impl Guest {
                         break;
                     }
                     shared.local.set_timeline(None, false);
-                    *shared.stream_id.lock() = None;
+                    *shared.media.lock() = MediaState::default();
                     if shared.host_away.load(Ordering::Relaxed) {
                         shared.view.lock().state = "waiting".into();
                         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -257,6 +270,7 @@ fn status_of(shared: &Shared) -> GuestStatus {
         // playing = audio for the current position is actually here (not just a timeline)
         playing: pos >= 0 && l.ring.highest() as i64 > pos,
         jumps: l.jumps.load(Ordering::Relaxed),
+        late_ms: shared.late_frames.load(Ordering::Relaxed) as f64 / rate * 1000.0,
     }
 }
 
@@ -314,54 +328,178 @@ async fn ping_loop(conn: Connection, shared: Arc<Shared>) {
     reader.abort();
 }
 
+/// Takes every uni stream the host opens: the meta stream once, then one per audio segment.
 async fn media_loop(conn: Connection, shared: Arc<Shared>) {
-    let res: Result<()> = async {
-        let mut recv = conn.accept_uni().await.context("media stream")?;
-        while let Some(msg) = proto::read_msg::<Media>(&mut recv).await? {
-            apply_media(&shared, msg);
-        }
-        Ok(())
+    while let Ok(recv) = conn.accept_uni().await {
+        let shared = shared.clone();
+        tokio::spawn(async move { read_uni(recv, &shared).await });
     }
-    .await;
-    if let Err(e) = res {
-        log::warn!("guest: media ended: {e:#}");
+}
+
+async fn read_uni(mut recv: iroh::endpoint::RecvStream, shared: &Shared) {
+    let mut kind = [0u8; 1];
+    if recv.read_exact(&mut kind).await.is_err() {
+        return;
+    }
+    match kind[0] {
+        proto::STREAM_META => {
+            let res: Result<()> = async {
+                while let Some(msg) = proto::read_msg::<Media>(&mut recv).await? {
+                    apply_media(shared, msg);
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                log::warn!("guest: media ended: {e:#}");
+            }
+        }
+        proto::STREAM_SEGMENT => {
+            let mut h = [0u8; proto::SEGMENT_HEADER_LEN];
+            if recv.read_exact(&mut h).await.is_err() {
+                return;
+            }
+            let hdr = SegmentHeader::decode(&h);
+            if hdr.frames > proto::MAX_SEGMENT_FRAMES {
+                log::warn!("guest: segment of {} frames refused", hdr.frames);
+                return;
+            }
+            let mut pcm = vec![0u8; hdr.frames as usize * 4];
+            match recv.read_exact(&mut pcm).await {
+                Ok(()) => apply_segment(shared, hdr, pcm),
+                // the host reset it: it could not arrive in time
+                Err(_) => {
+                    shared.late_frames.fetch_add(hdr.frames as u64, Ordering::Relaxed);
+                }
+            }
+        }
+        k => log::warn!("guest: unknown stream kind {k}"),
+    }
+}
+
+fn apply_segment(shared: &Shared, hdr: SegmentHeader, pcm: Vec<u8>) {
+    // Held while writing, so a StreamStart can't clear the ring between the check and the write.
+    let mut m = shared.media.lock();
+    match m.stream_id {
+        Some(id) if id == hdr.id => {
+            let pos = shared.local.position_frame.load(Ordering::Relaxed);
+            if pos >= 0 && hdr.first_frame + hdr.frames as u64 <= pos as u64 {
+                shared.late_frames.fetch_add(hdr.frames as u64, Ordering::Relaxed);
+                return;
+            }
+            shared.local.ring.write_s16le(hdr.first_frame, &pcm);
+        }
+        // stream ids only grow: a newer stream whose StreamStart is still on its way
+        cur if cur.map_or(true, |c| hdr.id > c) => {
+            if m.early.len() >= MAX_EARLY_SEGMENTS {
+                m.early.remove(0);
+            }
+            m.early.push((hdr, pcm));
+        }
+        _ => {} // from a stream that already ended
     }
 }
 
 fn apply_media(shared: &Shared, msg: Media) {
     match msg {
         Media::StreamStart { id, sample_rate, timeline, desc } => {
-            let mut cur = shared.stream_id.lock();
-            if *cur != Some(id) {
+            let mut m = shared.media.lock();
+            if m.stream_id != Some(id) {
                 shared.local.ring.clear();
-                *cur = Some(id);
+                m.stream_id = Some(id);
                 shared.local.set_stream_id(id);
                 shared.local.set_timeline(Some(timeline), true);
+                // segments that beat this StreamStart
+                for (hdr, pcm) in std::mem::take(&mut m.early) {
+                    if hdr.id == id {
+                        shared.local.ring.write_s16le(hdr.first_frame, &pcm);
+                    } else if hdr.id > id {
+                        m.early.push((hdr, pcm));
+                    }
+                }
                 log::info!("guest: stream {id} '{desc}' at {sample_rate} Hz");
             } else {
                 shared.local.set_timeline(Some(timeline), false);
             }
+            drop(m);
             let mut v = shared.view.lock();
             v.source = Some(desc);
             v.sample_rate = sample_rate;
         }
-        Media::Chunk { id, first_frame, pcm } => {
-            if *shared.stream_id.lock() == Some(id) {
-                shared.local.ring.write_i16(first_frame, &proto::bytes_to_pcm(&pcm));
-            }
-        }
         Media::Timeline { id, timeline } => {
-            if *shared.stream_id.lock() == Some(id) {
+            if shared.media.lock().stream_id == Some(id) {
                 shared.local.set_timeline(Some(timeline), false);
             }
         }
         Media::StreamStop { id } => {
-            let mut cur = shared.stream_id.lock();
-            if *cur == Some(id) {
-                *cur = None;
+            let mut m = shared.media.lock();
+            if m.stream_id == Some(id) {
+                m.stream_id = None;
+                m.early.retain(|(h, _)| h.id > id);
                 shared.local.set_timeline(None, false);
+                drop(m);
                 shared.view.lock().source = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::timeline::Timeline;
+
+    fn shared() -> Shared {
+        Shared {
+            view: Mutex::new(GuestView::default()),
+            sync: Mutex::new(ClockSync::new()),
+            local: PlayerShared::new(PcmRing::new(4800)),
+            media: Mutex::new(MediaState::default()),
+            late_frames: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+            host_away: AtomicBool::new(false),
+            name: "t".into(),
+            platform: "test".into(),
+        }
+    }
+
+    fn seg(id: u32, first_frame: u64, frames: u32) -> (SegmentHeader, Vec<u8>) {
+        (SegmentHeader { id, first_frame, frames }, vec![0x10; frames as usize * 4])
+    }
+
+    fn start(id: u32) -> Media {
+        Media::StreamStart { id, sample_rate: 48_000, timeline: Timeline::new(0, 48_000.0), desc: "x".into() }
+    }
+
+    fn has(s: &Shared, f: i64) -> bool {
+        s.local.ring.with_reader(|r| r.frame(f).is_some())
+    }
+
+    #[test]
+    fn segment_before_its_stream_start_is_kept() {
+        let s = shared();
+        let (h, p) = seg(5, 100, 10);
+        apply_segment(&s, h, p); // beat its StreamStart
+        assert!(!has(&s, 100));
+        apply_media(&s, start(5));
+        assert!(has(&s, 100) && has(&s, 109));
+        assert!(s.media.lock().early.is_empty());
+    }
+
+    #[test]
+    fn late_and_stale_segments_are_not_played() {
+        let s = shared();
+        apply_media(&s, start(5));
+        s.local.position_frame.store(500, Ordering::Relaxed);
+        let (h, p) = seg(5, 100, 10); // ends long before the play position
+        apply_segment(&s, h, p);
+        assert!(!has(&s, 100));
+        assert_eq!(s.late_frames.load(Ordering::Relaxed), 10);
+        let (h, p) = seg(4, 600, 10); // an earlier stream's straggler
+        apply_segment(&s, h, p);
+        assert!(!has(&s, 600) && s.media.lock().early.is_empty());
+        let (h, p) = seg(5, 600, 10);
+        apply_segment(&s, h, p);
+        assert!(has(&s, 600));
     }
 }

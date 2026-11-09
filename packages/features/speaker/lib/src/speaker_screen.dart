@@ -181,6 +181,7 @@ class SpeakerDetailsScreen extends ConsumerWidget {
               GPRow(title: 'Buffered', figure: true, value: formatMs(l.bufferMs, digits: 0)),
               GPRow(title: 'Output latency', figure: true, value: formatMs(l.latencyMs)),
               GPRow(title: 'Dropouts', figure: true, value: formatMs(l.underrunMs, digits: 0)),
+              GPRow(title: 'Late audio', figure: true, value: formatMs(l.lateMs, digits: 0)),
               GPRow(title: 'Resyncs', figure: true, value: '${l.jumps}'),
             ],
           ),

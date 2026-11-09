@@ -15,7 +15,7 @@ use iroh::endpoint::Connection;
 use iroh::Endpoint;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -29,11 +29,26 @@ const PULL_START_NS: i64 = 700_000_000;
 /// Recent media kept for guests that join mid-stream.
 const RECENT_NS: i64 = 4_000_000_000;
 
+/// A segment counts as usable until this long before its last frame plays on a guest (one
+/// output callback has to find it in the ring).
+const CALLBACK_MARGIN_NS: i64 = 10_000_000;
+
+/// What goes out to every guest.
 #[derive(Clone)]
-struct Frame {
-    bytes: Arc<Vec<u8>>,
-    /// For chunks: the stream frame one past the end; for others 0.
+enum Frame {
+    /// A length-prefixed `Media` message for the reliable, ordered meta stream.
+    Meta(Arc<Vec<u8>>),
+    /// One chunk of audio, sent on a segment stream of its own.
+    Segment(Arc<Segment>),
+}
+
+struct Segment {
+    /// The whole segment-stream payload (kind byte, header, PCM).
+    bytes: Vec<u8>,
+    /// Stream frame one past the segment's end.
     end_frame: u64,
+    /// When that frame plays on the host clock, before any per-speaker delay.
+    play_end_ns: i64,
 }
 
 struct StreamInfo {
@@ -69,7 +84,7 @@ static NEXT_CONN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 
 struct Shared {
     stream: Mutex<Option<StreamInfo>>,
-    recent: Mutex<VecDeque<Frame>>,
+    recent: Mutex<VecDeque<Arc<Segment>>>,
     bus: broadcast::Sender<Frame>,
     peers: Mutex<HashMap<String, PeerInfo>>,
     local: Arc<PlayerShared>,
@@ -81,6 +96,10 @@ struct Shared {
     /// Whether the host's own delay came from tuning.
     self_tuned: AtomicBool,
     tuning: AtomicBool,
+    /// Margin between capture and playout for live sources (ns). A running capture follows it.
+    live_delay_ns: AtomicI64,
+    /// A live capture is running.
+    live: AtomicBool,
 }
 
 impl Shared {
@@ -106,34 +125,13 @@ impl Shared {
         self.send_to(peer, HostMsg::SetDelay { delay_ms: ms });
     }
 
-    fn publish(&self, msg: &Media, end_frame: u64) {
-        let bytes = match proto::frame(msg) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                log::error!("host: encode media: {e}");
-                return;
+    fn publish_meta(&self, msg: &Media) {
+        match proto::frame(msg) {
+            Ok(b) => {
+                let _ = self.bus.send(Frame::Meta(Arc::new(b)));
             }
-        };
-        let frame = Frame { bytes, end_frame };
-        if matches!(msg, Media::Chunk { .. }) {
-            // Lock order everywhere: `stream` before `recent`.
-            let cutoff = self
-                .stream
-                .lock()
-                .as_ref()
-                .map(|s| s.timeline.frame_at((now_ns() - RECENT_NS) as f64).max(0.0) as u64)
-                .unwrap_or(0);
-            let mut recent = self.recent.lock();
-            recent.push_back(frame.clone());
-            // drop chunks that played more than RECENT_NS ago
-            while recent.front().map(|f| f.end_frame < cutoff).unwrap_or(false) {
-                recent.pop_front();
-            }
-            while recent.len() > 2000 {
-                recent.pop_front();
-            }
+            Err(e) => log::error!("host: encode media: {e}"),
         }
-        let _ = self.bus.send(frame);
     }
 
     fn start_stream(&self, sample_rate: u32, timeline: Timeline, desc: String) -> u32 {
@@ -143,14 +141,36 @@ impl Shared {
         self.local.ring.clear();
         self.local.set_stream_id(id);
         self.local.set_timeline(Some(timeline), true);
-        self.publish(&Media::StreamStart { id, sample_rate, timeline, desc }, 0);
+        self.publish_meta(&Media::StreamStart { id, sample_rate, timeline, desc });
         id
     }
 
     fn chunk(&self, id: u32, first_frame: u64, pcm: &[i16]) {
+        // Lock order everywhere: `stream` before `recent`.
+        let Some(tl) = self.stream.lock().as_ref().filter(|s| s.id == id).map(|s| s.timeline) else {
+            return; // a source thread still finishing after its stream was replaced
+        };
         self.local.ring.write_i16(first_frame, pcm);
-        let end = first_frame + (pcm.len() / 2) as u64;
-        self.publish(&Media::Chunk { id, first_frame, pcm: proto::pcm_to_bytes(pcm) }, end);
+        let frames = (pcm.len() / 2) as u32;
+        let end_frame = first_frame + frames as u64;
+        let seg = Arc::new(Segment {
+            bytes: proto::SegmentHeader { id, first_frame, frames }.stream_bytes(pcm),
+            end_frame,
+            play_end_ns: tl.host_ns_at(end_frame as f64) as i64,
+        });
+        {
+            let cutoff = tl.frame_at((now_ns() - RECENT_NS) as f64).max(0.0) as u64;
+            let mut recent = self.recent.lock();
+            recent.push_back(seg.clone());
+            // drop chunks that played more than RECENT_NS ago
+            while recent.front().map(|s| s.end_frame < cutoff).unwrap_or(false) {
+                recent.pop_front();
+            }
+            while recent.len() > 2000 {
+                recent.pop_front();
+            }
+        }
+        let _ = self.bus.send(Frame::Segment(seg));
     }
 
     fn retime(&self, id: u32, timeline: Timeline) {
@@ -162,7 +182,7 @@ impl Shared {
             }
         }
         self.local.set_timeline(Some(timeline), false);
-        self.publish(&Media::Timeline { id, timeline }, 0);
+        self.publish_meta(&Media::Timeline { id, timeline });
     }
 
     fn stop_stream(&self, id: u32) {
@@ -175,30 +195,18 @@ impl Shared {
         }
         self.recent.lock().clear();
         self.local.set_timeline(None, false);
-        self.publish(&Media::StreamStop { id }, 0);
+        self.publish_meta(&Media::StreamStop { id });
     }
 
-    /// The stream frame being heard right now (0 when nothing plays).
-    fn playing_frame(&self) -> u64 {
-        self.stream.lock().as_ref().map(|s| s.timeline.frame_at(now_ns() as f64).max(0.0) as u64).unwrap_or(0)
-    }
-
-    /// What a guest needs to join the current stream: StreamStart + chunks not yet played.
-    fn snapshot(&self) -> Vec<Frame> {
+    /// What a guest needs to join the current stream: its StreamStart (a meta message) and the
+    /// segments that have not played yet.
+    fn snapshot(&self) -> (Option<Arc<Vec<u8>>>, Vec<Arc<Segment>>) {
         let stream = self.stream.lock();
-        let Some(s) = stream.as_ref() else { return Vec::new() };
-        let mut out = Vec::new();
+        let Some(s) = stream.as_ref() else { return (None, Vec::new()) };
         let start = Media::StreamStart { id: s.id, sample_rate: s.sample_rate, timeline: s.timeline, desc: s.desc.clone() };
-        if let Ok(b) = proto::frame(&start) {
-            out.push(Frame { bytes: Arc::new(b), end_frame: 0 });
-        }
-        let playing_now = s.timeline.frame_at(now_ns() as f64).max(0.0) as u64;
-        for f in self.recent.lock().iter() {
-            if f.end_frame > playing_now {
-                out.push(f.clone());
-            }
-        }
-        out
+        let now = now_ns();
+        let segments = self.recent.lock().iter().filter(|g| g.play_end_ns > now).cloned().collect();
+        (proto::frame(&start).ok().map(Arc::new), segments)
     }
 }
 
@@ -230,7 +238,7 @@ pub struct Host {
     _player: Option<Player>,
     source: Mutex<Option<SourceHandle>>,
     accept: tokio::task::JoinHandle<()>,
-    playout_delay_ns: Mutex<i64>,
+    watch: tokio::task::JoinHandle<()>,
 }
 
 pub struct HostSnapshot {
@@ -294,18 +302,14 @@ impl Host {
             timings: Mutex::new(HashMap::new()),
             self_tuned: AtomicBool::new(false),
             tuning: AtomicBool::new(false),
+            live_delay_ns: AtomicI64::new(300_000_000),
+            live: AtomicBool::new(false),
         });
         let player = Some(Player::start(local));
         let accept = tokio::spawn(accept_loop(endpoint.clone(), shared.clone()));
+        let watch = tokio::spawn(buffer_watch(shared.clone()));
         log::info!("host: listening as {}", endpoint.id());
-        Ok(Host {
-            endpoint,
-            shared,
-            _player: player,
-            source: Mutex::new(None),
-            accept,
-            playout_delay_ns: Mutex::new(300_000_000),
-        })
+        Ok(Host { endpoint, shared, _player: player, source: Mutex::new(None), accept, watch })
     }
 
     pub fn ticket(&self) -> Ticket {
@@ -348,8 +352,14 @@ impl Host {
         &self.shared.local
     }
 
+    /// Live sources' margin between capture and playout. A running capture moves to it at once
+    /// (every speaker jumps by the difference together).
     pub fn set_playout_delay_ms(&self, ms: u32) {
-        *self.playout_delay_ns.lock() = ms.clamp(60, 3000) as i64 * 1_000_000;
+        self.shared.live_delay_ns.store(ms.clamp(60, 3000) as i64 * 1_000_000, Ordering::Relaxed);
+    }
+
+    pub fn playout_delay_ms(&self) -> u32 {
+        (self.shared.live_delay_ns.load(Ordering::Relaxed) / 1_000_000) as u32
     }
 
     pub fn stop_source(&self) {
@@ -381,9 +391,8 @@ impl Host {
         let stop = Arc::new(AtomicBool::new(false));
         let shared = self.shared.clone();
         let st = stop.clone();
-        let delay = *self.playout_delay_ns.lock();
         let thread = thread::Builder::new().name("gp-capture".into()).spawn(move || {
-            if let Err(e) = run_fd(reader, sample_rate, label, delay, &shared, &st) {
+            if let Err(e) = run_fd(reader, sample_rate, label, &shared, &st) {
                 log::error!("capture: {e:#}");
             }
         })?;
@@ -460,6 +469,7 @@ impl Host {
     pub async fn shutdown(self) {
         // stop taking connections first, or a guest told "host ended" rejoins in the gap
         self.accept.abort();
+        self.watch.abort();
         self.stop_source();
         for p in self.shared.peers.lock().values() {
             let _ = p.cmd.send(HostMsg::Kick { reason: "host ended the session".into(), resumable: true });
@@ -666,9 +676,21 @@ impl Level {
     }
 }
 
+/// Clears the host's "a live capture is running" flag however the capture ends.
+struct LiveFlag<'a>(&'a AtomicBool);
+
+impl Drop for LiveFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Live capture. Frames arrive in real time on the *capture* clock; the timeline's rate is
-/// adjusted (PI loop) so the margin between arrival and playout stays at `delay_ns`.
-fn run_fd(mut reader: FdReader, rate: u32, label: String, delay_ns: i64, shared: &Shared, stop: &AtomicBool) -> Result<()> {
+/// adjusted (PI loop) so the margin between arrival and playout stays at the live delay.
+fn run_fd(mut reader: FdReader, rate: u32, label: String, shared: &Shared, stop: &AtomicBool) -> Result<()> {
+    shared.live.store(true, Ordering::Relaxed);
+    let _live = LiveFlag(&shared.live);
+    let mut delay_ns = shared.live_delay_ns.load(Ordering::Relaxed);
     let chunk = (rate / 100).max(1) as usize; // 10 ms reads
     let mut pcm = Vec::with_capacity(chunk * 2);
     // first data
@@ -696,6 +718,17 @@ fn run_fd(mut reader: FdReader, rate: u32, label: String, delay_ns: i64, shared:
             break;
         }
         let now = now_ns();
+        let want = shared.live_delay_ns.load(Ordering::Relaxed);
+        if want != delay_ns {
+            // every speaker moves by the difference at once (the host and guests share the timeline)
+            log::info!("capture: playout delay {} -> {} ms", delay_ns / 1_000_000, want / 1_000_000);
+            tl = Timeline { anchor_host_ns: tl.anchor_host_ns + (want - delay_ns), ..tl };
+            shared.retime(id, tl);
+            delay_ns = want;
+            integral = 0.0;
+            window_best = f64::MIN;
+            window_start = now;
+        }
         level.add(&pcm);
         if level.samples >= rate as u64 * 2 * 5 {
             // every ~5 s: how loud the capture is (a quiet host or speakers start here)
@@ -794,41 +827,13 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) -> Result<()> {
     let media = {
         let conn = conn.clone();
         let shared = shared.clone();
+        let peer = PeerRef { id: peer_id.clone(), name: name.clone() };
         tokio::spawn(async move {
-            let res: Result<()> = async {
-                let mut send = conn.open_uni().await.context("media stream")?;
-                let mut rx = shared.bus.subscribe();
-                for f in shared.snapshot() {
-                    send.write_all(&f.bytes).await?;
+            if let Err(e) = media_pump(conn.clone(), shared, peer).await {
+                // a connection that closed on its own is reported by the control loop
+                if conn.close_reason().is_none() {
+                    log::warn!("host: media pump ended: {e:#}");
                 }
-                let mut skipped: u64 = 0;
-                loop {
-                    match rx.recv().await {
-                        Ok(f) => {
-                            // A slow link (relay, congested Wi-Fi) must not queue audio that is
-                            // already too late to play: skip it and catch up instead.
-                            if f.end_frame != 0 && f.end_frame < shared.playing_frame() {
-                                skipped += 1;
-                                if skipped % 50 == 1 {
-                                    log::warn!("host: guest is behind, skipped {skipped} late chunks");
-                                }
-                                continue;
-                            }
-                            send.write_all(&f.bytes).await?
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            log::warn!("host: guest lagged {n} frames, resyncing");
-                            for f in shared.snapshot() {
-                                send.write_all(&f.bytes).await?;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => return Ok(()),
-                    }
-                }
-            }
-            .await;
-            if let Err(e) = res {
-                log::warn!("host: media pump ended: {e:#}");
             }
         })
     };
@@ -869,6 +874,153 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) -> Result<()> {
     pinger.abort();
     conn.close(0u32.into(), b"bye");
     result
+}
+
+/// Steps the live delay climbs through when speakers keep losing audio.
+const LIVE_DELAY_STEPS_MS: [i64; 3] = [500, 800, 1000]; // the Buffer slider tops out at 1000
+/// Audio a speaker may lose per watch window before the live delay goes up.
+const LOST_PER_WINDOW_MS: f64 = 60.0;
+
+/// Live sources have only the playout delay as headroom against Wi-Fi hiccups. When a speaker
+/// keeps losing audio during a live share, give everyone more room: one step at a time, and
+/// never back down on its own (the Buffer control on the host screen can).
+async fn buffer_watch(shared: Arc<Shared>) {
+    let mut last: HashMap<String, f64> = HashMap::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tick.tick().await;
+        if !shared.live.load(Ordering::Relaxed) {
+            last.clear();
+            continue;
+        }
+        let mut worst: Option<(String, f64)> = None;
+        for p in shared.peers.lock().values().filter(|p| p.connected) {
+            let Some(st) = p.status.as_ref() else { continue };
+            // silence the speaker actually played for lack of audio (late, dropped, or never sent)
+            let lost = st.underrun_ms - last.insert(p.id.clone(), st.underrun_ms).unwrap_or(st.underrun_ms);
+            if worst.as_ref().map_or(true, |(_, w)| lost > *w) {
+                worst = Some((p.name.clone(), lost));
+            }
+        }
+        let Some((name, lost)) = worst else { continue };
+        if lost <= LOST_PER_WINDOW_MS {
+            continue;
+        }
+        let cur = shared.live_delay_ns.load(Ordering::Relaxed) / 1_000_000;
+        if let Some(&next) = LIVE_DELAY_STEPS_MS.iter().find(|&&s| s > cur) {
+            log::warn!("host: {name} lost {lost:.0} ms of audio in 2 s; live buffer {cur} -> {next} ms");
+            shared.live_delay_ns.store(next * 1_000_000, Ordering::Relaxed);
+        }
+    }
+}
+
+struct PeerRef {
+    id: String,
+    name: String,
+}
+
+/// Feeds one guest: the meta stream, then a segment stream per chunk of audio. A segment that
+/// can't reach the guest before it plays there is skipped (or reset once in flight), so a slow
+/// moment costs a short gap instead of a backlog that makes every later chunk late too.
+async fn media_pump(conn: Connection, shared: Arc<Shared>, peer: PeerRef) -> Result<()> {
+    let mut meta = conn.open_uni().await.context("meta stream")?;
+    let _ = meta.set_priority(i32::MAX);
+    meta.write_all(&[proto::STREAM_META]).await.context("meta")?;
+    let mut rx = shared.bus.subscribe();
+    let mut segments = SegmentSender::new(conn, peer);
+    segments.refresh_offset(&shared);
+    let (start, recent) = shared.snapshot();
+    if let Some(b) = start {
+        meta.write_all(&b).await.context("meta")?;
+    }
+    for s in recent {
+        segments.send(s).await?;
+    }
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            m = rx.recv() => match m {
+                Ok(Frame::Meta(b)) => meta.write_all(&b).await.context("meta")?,
+                Ok(Frame::Segment(s)) => segments.send(s).await?,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    // Segments stand alone; what may be lost is a timeline change, so resend it.
+                    log::warn!("host: {} fell {n} messages behind, resyncing", segments.peer.name);
+                    if let (Some(b), _) = shared.snapshot() {
+                        meta.write_all(&b).await.context("meta")?;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            },
+            _ = tick.tick() => {
+                segments.refresh_offset(&shared);
+                segments.report();
+            }
+        }
+    }
+}
+
+struct SegmentSender {
+    conn: Connection,
+    peer: PeerRef,
+    /// When this guest hears a frame relative to the host's playout: its delay minus its
+    /// output latency (ns), from its latest status.
+    offset_ns: i64,
+    seq: u32,
+    skipped: u64,
+    reset: Arc<std::sync::atomic::AtomicU64>,
+    reported: (u64, u64),
+}
+
+impl SegmentSender {
+    fn new(conn: Connection, peer: PeerRef) -> Self {
+        Self { conn, peer, offset_ns: 0, seq: 0, skipped: 0, reset: Default::default(), reported: (0, 0) }
+    }
+
+    fn refresh_offset(&mut self, shared: &Shared) {
+        if let Some(st) = shared.peers.lock().get(&self.peer.id).and_then(|p| p.status.as_ref()) {
+            self.offset_ns = ((st.delay_ms - st.latency_ms) * 1e6) as i64;
+        }
+    }
+
+    async fn send(&mut self, seg: Arc<Segment>) -> Result<()> {
+        let deadline = seg.play_end_ns + self.offset_ns - CALLBACK_MARGIN_NS;
+        if deadline <= now_ns() {
+            self.skipped += 1;
+            return Ok(());
+        }
+        let mut s = self.conn.open_uni().await.context("segment stream")?;
+        // Older segments go first: they play sooner.
+        let _ = s.set_priority(-((self.seq & 0x3fff_ffff) as i32));
+        self.seq = self.seq.wrapping_add(1);
+        s.write_all(&seg.bytes).await.context("segment")?;
+        let _ = s.finish();
+        let reset = self.reset.clone();
+        tokio::spawn(async move {
+            let left = Duration::from_nanos((deadline - now_ns()).max(0) as u64);
+            if tokio::time::timeout(left, s.stopped()).await.is_err() {
+                // Not delivered in time: stop retransmitting audio nobody can play any more.
+                if s.reset(0u32.into()).is_ok() {
+                    reset.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Once a second, if anything was given up on.
+    fn report(&mut self) {
+        let reset = self.reset.load(Ordering::Relaxed);
+        let (skipped0, reset0) = self.reported;
+        if self.skipped > skipped0 || reset > reset0 {
+            log::warn!(
+                "host: {} is behind: {} chunks too late to send, {} reset in flight",
+                self.peer.name,
+                self.skipped - skipped0,
+                reset - reset0
+            );
+        }
+        self.reported = (self.skipped, reset);
+    }
 }
 
 async fn answer_pings(conn: Connection) {

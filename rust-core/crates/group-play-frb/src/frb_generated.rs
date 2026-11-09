@@ -1104,6 +1104,7 @@ impl SseDecode for crate::api::engine::EngineStatus {
         let mut var_pathRttMs = <f64>::sse_decode(deserializer);
         let mut var_source = <Option<String>>::sse_decode(deserializer);
         let mut var_streamRate = <u32>::sse_decode(deserializer);
+        let mut var_playoutDelayMs = <u32>::sse_decode(deserializer);
         let mut var_peers = <Vec<crate::api::engine::PeerStatus>>::sse_decode(deserializer);
         let mut var_local = <crate::api::engine::LocalStatus>::sse_decode(deserializer);
         let mut var_endedReason = <Option<String>>::sse_decode(deserializer);
@@ -1118,6 +1119,7 @@ impl SseDecode for crate::api::engine::EngineStatus {
             path_rtt_ms: var_pathRttMs,
             source: var_source,
             stream_rate: var_streamRate,
+            playout_delay_ms: var_playoutDelayMs,
             peers: var_peers,
             local: var_local,
             ended_reason: var_endedReason,
@@ -1224,6 +1226,7 @@ impl SseDecode for crate::api::engine::LocalStatus {
         let mut var_errMs = <f64>::sse_decode(deserializer);
         let mut var_bufferMs = <f64>::sse_decode(deserializer);
         let mut var_underrunMs = <f64>::sse_decode(deserializer);
+        let mut var_lateMs = <f64>::sse_decode(deserializer);
         let mut var_jumps = <u64>::sse_decode(deserializer);
         let mut var_delayMs = <f64>::sse_decode(deserializer);
         let mut var_tuned = <bool>::sse_decode(deserializer);
@@ -1243,6 +1246,7 @@ impl SseDecode for crate::api::engine::LocalStatus {
             err_ms: var_errMs,
             buffer_ms: var_bufferMs,
             underrun_ms: var_underrunMs,
+            late_ms: var_lateMs,
             jumps: var_jumps,
             delay_ms: var_delayMs,
             tuned: var_tuned,
@@ -1313,6 +1317,7 @@ impl SseDecode for crate::api::engine::PeerStatus {
         let mut var_output = <String>::sse_decode(deserializer);
         let mut var_playing = <bool>::sse_decode(deserializer);
         let mut var_jumps = <u64>::sse_decode(deserializer);
+        let mut var_lateMs = <f64>::sse_decode(deserializer);
         return crate::api::engine::PeerStatus {
             id: var_id,
             name: var_name,
@@ -1333,6 +1338,7 @@ impl SseDecode for crate::api::engine::PeerStatus {
             output: var_output,
             playing: var_playing,
             jumps: var_jumps,
+            late_ms: var_lateMs,
         };
     }
 }
@@ -1493,6 +1499,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::EngineStatus {
             self.path_rtt_ms.into_into_dart().into_dart(),
             self.source.into_into_dart().into_dart(),
             self.stream_rate.into_into_dart().into_dart(),
+            self.playout_delay_ms.into_into_dart().into_dart(),
             self.peers.into_into_dart().into_dart(),
             self.local.into_into_dart().into_dart(),
             self.ended_reason.into_into_dart().into_dart(),
@@ -1545,6 +1552,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::LocalStatus {
             self.err_ms.into_into_dart().into_dart(),
             self.buffer_ms.into_into_dart().into_dart(),
             self.underrun_ms.into_into_dart().into_dart(),
+            self.late_ms.into_into_dart().into_dart(),
             self.jumps.into_into_dart().into_dart(),
             self.delay_ms.into_into_dart().into_dart(),
             self.tuned.into_into_dart().into_dart(),
@@ -1594,6 +1602,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::PeerStatus {
             self.output.into_into_dart().into_dart(),
             self.playing.into_into_dart().into_dart(),
             self.jumps.into_into_dart().into_dart(),
+            self.late_ms.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1729,6 +1738,7 @@ impl SseEncode for crate::api::engine::EngineStatus {
         <f64>::sse_encode(self.path_rtt_ms, serializer);
         <Option<String>>::sse_encode(self.source, serializer);
         <u32>::sse_encode(self.stream_rate, serializer);
+        <u32>::sse_encode(self.playout_delay_ms, serializer);
         <Vec<crate::api::engine::PeerStatus>>::sse_encode(self.peers, serializer);
         <crate::api::engine::LocalStatus>::sse_encode(self.local, serializer);
         <Option<String>>::sse_encode(self.ended_reason, serializer);
@@ -1819,6 +1829,7 @@ impl SseEncode for crate::api::engine::LocalStatus {
         <f64>::sse_encode(self.err_ms, serializer);
         <f64>::sse_encode(self.buffer_ms, serializer);
         <f64>::sse_encode(self.underrun_ms, serializer);
+        <f64>::sse_encode(self.late_ms, serializer);
         <u64>::sse_encode(self.jumps, serializer);
         <f64>::sse_encode(self.delay_ms, serializer);
         <bool>::sse_encode(self.tuned, serializer);
@@ -1885,6 +1896,7 @@ impl SseEncode for crate::api::engine::PeerStatus {
         <String>::sse_encode(self.output, serializer);
         <bool>::sse_encode(self.playing, serializer);
         <u64>::sse_encode(self.jumps, serializer);
+        <f64>::sse_encode(self.late_ms, serializer);
     }
 }
 

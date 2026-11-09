@@ -15,7 +15,14 @@ pub const HOST_PORT: u16 = 47_100;
 /// `secret`: a fixed identity (same endpoint id every launch), or None for a fresh one.
 pub async fn make_endpoint(accept: bool, secret: Option<[u8; 32]>) -> Result<Endpoint> {
     let build = |fixed_port: bool| -> Result<iroh::endpoint::Builder> {
-        let mut b = Endpoint::builder(presets::N0);
+        let transport = iroh::endpoint::QuicTransportConfig::builder()
+            // a vanished peer is noticed in seconds (the guest's own ping watchdog is 5 s)
+            .max_idle_timeout(Some(std::time::Duration::from_secs(10).try_into()?))
+            .keep_alive_interval(std::time::Duration::from_secs(2))
+            // one uni stream per audio segment: up to a few hundred are open on a slow link
+            .max_concurrent_uni_streams(1024u32.into())
+            .build();
+        let mut b = Endpoint::builder(presets::N0).transport_config(transport);
         if let Some(key) = secret {
             b = b.secret_key(iroh::SecretKey::from_bytes(&key));
         }

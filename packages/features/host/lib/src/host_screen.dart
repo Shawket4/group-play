@@ -334,7 +334,7 @@ class _Buffer extends ConsumerWidget {
             max: 1000,
             step: 20,
             format: (v) => '${v.round()} ms',
-            hint: 'Raise it if speakers drop out. Applies when sharing starts again.',
+            hint: 'More buffer rides out Wi-Fi hiccups. Goes up by itself if speakers drop out.',
             onChanged: (v) => n.setPlayoutDelay(v.round()),
             onChangeEnd: (v) => unawaited(n.applyPlayoutDelay(v.round())),
           ),

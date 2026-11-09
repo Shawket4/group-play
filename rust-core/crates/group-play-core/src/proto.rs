@@ -2,8 +2,10 @@
 //!
 //! Streams per guest connection:
 //! - control (bi, opened by the guest): `GuestMsg` up, `HostMsg` down.
-//! - media (uni, opened by the host): `Media`, strictly ordered, so a chunk never arrives before
-//!   the `StreamStart` it belongs to.
+//! - meta (uni, opened by the host, first byte `STREAM_META`): `Media`, reliable and ordered.
+//! - segments (uni, one per chunk of audio, first byte `STREAM_SEGMENT`): a `SegmentHeader` and
+//!   raw PCM. Independent of each other, so one lost packet only delays its own segment, and the
+//!   host resets a segment that can no longer arrive in time instead of queueing stale audio.
 //! - datagrams: `Dgram` ping/pong for clock sync (unreliable on purpose: a late answer is useless).
 
 use super::timeline::Timeline;
@@ -12,8 +14,46 @@ use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const ALPN: &[u8] = b"group-play/1";
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 const MAX_FRAME: usize = 1 << 20;
+
+/// First byte of every uni stream the host opens.
+pub const STREAM_META: u8 = 0;
+pub const STREAM_SEGMENT: u8 = 1;
+pub const SEGMENT_HEADER_LEN: usize = 16;
+/// Largest segment a guest accepts (frames); chunks are 10-20 ms.
+pub const MAX_SEGMENT_FRAMES: u32 = 48_000;
+
+/// Which audio a segment stream carries. Its payload is `frames` interleaved stereo s16le frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegmentHeader {
+    pub id: u32,
+    pub first_frame: u64,
+    pub frames: u32,
+}
+
+impl SegmentHeader {
+    /// The whole stream payload: kind byte, header, PCM.
+    pub fn stream_bytes(&self, pcm: &[i16]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + SEGMENT_HEADER_LEN + pcm.len() * 2);
+        out.push(STREAM_SEGMENT);
+        out.extend_from_slice(&self.id.to_le_bytes());
+        out.extend_from_slice(&self.first_frame.to_le_bytes());
+        out.extend_from_slice(&self.frames.to_le_bytes());
+        for s in pcm {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn decode(b: &[u8; SEGMENT_HEADER_LEN]) -> Self {
+        Self {
+            id: u32::from_le_bytes(b[0..4].try_into().unwrap()),
+            first_frame: u64::from_le_bytes(b[4..12].try_into().unwrap()),
+            frames: u32::from_le_bytes(b[12..16].try_into().unwrap()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GuestStatus {
@@ -29,6 +69,8 @@ pub struct GuestStatus {
     pub output: String,
     pub playing: bool,
     pub jumps: u64,
+    /// Audio that arrived too late to play, or that the host gave up sending (ms, cumulative).
+    pub late_ms: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,11 +94,10 @@ pub enum HostMsg {
     Kick { reason: String, resumable: bool },
 }
 
+/// Meta-stream messages. The audio itself travels in segment streams.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Media {
     StreamStart { id: u32, sample_rate: u32, timeline: Timeline, desc: String },
-    /// Interleaved stereo s16le.
-    Chunk { id: u32, first_frame: u64, pcm: Vec<u8> },
     Timeline { id: u32, timeline: Timeline },
     StreamStop { id: u32 },
 }
@@ -106,30 +147,27 @@ pub async fn read_msg<T: DeserializeOwned>(recv: &mut iroh::endpoint::RecvStream
     Ok(Some(decode(&body)?))
 }
 
-pub fn pcm_to_bytes(pcm: &[i16]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pcm.len() * 2);
-    for s in pcm {
-        out.extend_from_slice(&s.to_le_bytes());
-    }
-    out
-}
-
-pub fn bytes_to_pcm(bytes: &[u8]) -> Vec<i16> {
-    bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn roundtrip() {
-        let m = Media::Chunk { id: 3, first_frame: 1 << 40, pcm: vec![1, 2, 3, 4] };
+        let m = Media::StreamStop { id: 3 };
         let f = frame(&m).unwrap();
         assert_eq!(u32::from_le_bytes(f[..4].try_into().unwrap()) as usize, f.len() - 4);
         assert_eq!(decode::<Media>(&f[4..]).unwrap(), m);
         let d = Dgram::Pong { seq: 9, t0: -5, t1: 6, t2: 7 };
         assert_eq!(decode::<Dgram>(&encode(&d).unwrap()).unwrap(), d);
-        assert_eq!(bytes_to_pcm(&pcm_to_bytes(&[-3, 7, i16::MIN])), vec![-3, 7, i16::MIN]);
+    }
+
+    #[test]
+    fn segment_layout() {
+        let h = SegmentHeader { id: 7, first_frame: 1 << 40, frames: 2 };
+        let b = h.stream_bytes(&[-3, 7, i16::MIN, i16::MAX]);
+        assert_eq!(b[0], STREAM_SEGMENT);
+        assert_eq!(b.len(), 1 + SEGMENT_HEADER_LEN + 8);
+        assert_eq!(SegmentHeader::decode(b[1..1 + SEGMENT_HEADER_LEN].try_into().unwrap()), h);
+        assert_eq!(&b[1 + SEGMENT_HEADER_LEN..], &[0xfd, 0xff, 7, 0, 0, 0x80, 0xff, 0x7f]);
     }
 }

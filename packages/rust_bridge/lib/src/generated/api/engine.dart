@@ -70,7 +70,7 @@ Future<void> playFd({
 
 Future<void> stopSource() => RustLib.instance.api.crateApiEngineStopSource();
 
-/// Margin between capture and playout for live sources (next capture start). Default 300 ms.
+/// Margin between capture and playout for live sources; a running capture moves to it at once. Default 300 ms.
 Future<void> setPlayoutDelayMs({required int ms}) =>
     RustLib.instance.api.crateApiEngineSetPlayoutDelayMs(ms: ms);
 
@@ -148,6 +148,9 @@ class EngineStatus {
   final double pathRttMs;
   final String? source;
   final int streamRate;
+
+  /// Host: live sources' buffer (ms); it can go up on its own when speakers lose audio.
+  final int playoutDelayMs;
   final List<PeerStatus> peers;
   final LocalStatus local;
   final String? endedReason;
@@ -163,6 +166,7 @@ class EngineStatus {
     required this.pathRttMs,
     this.source,
     required this.streamRate,
+    required this.playoutDelayMs,
     required this.peers,
     required this.local,
     this.endedReason,
@@ -180,6 +184,7 @@ class EngineStatus {
       pathRttMs.hashCode ^
       source.hashCode ^
       streamRate.hashCode ^
+      playoutDelayMs.hashCode ^
       peers.hashCode ^
       local.hashCode ^
       endedReason.hashCode ^
@@ -199,6 +204,7 @@ class EngineStatus {
           pathRttMs == other.pathRttMs &&
           source == other.source &&
           streamRate == other.streamRate &&
+          playoutDelayMs == other.playoutDelayMs &&
           peers == other.peers &&
           local == other.local &&
           endedReason == other.endedReason &&
@@ -238,6 +244,9 @@ class LocalStatus {
   final double errMs;
   final double bufferMs;
   final double underrunMs;
+
+  /// Guest: audio that arrived too late to play or that the host gave up sending (ms).
+  final double lateMs;
   final BigInt jumps;
 
   /// Host: this phone's own delay. Guest: the delay the host gave it. ms.
@@ -262,6 +271,7 @@ class LocalStatus {
     required this.errMs,
     required this.bufferMs,
     required this.underrunMs,
+    required this.lateMs,
     required this.jumps,
     required this.delayMs,
     required this.tuned,
@@ -284,6 +294,7 @@ class LocalStatus {
       errMs.hashCode ^
       bufferMs.hashCode ^
       underrunMs.hashCode ^
+      lateMs.hashCode ^
       jumps.hashCode ^
       delayMs.hashCode ^
       tuned.hashCode ^
@@ -308,6 +319,7 @@ class LocalStatus {
           errMs == other.errMs &&
           bufferMs == other.bufferMs &&
           underrunMs == other.underrunMs &&
+          lateMs == other.lateMs &&
           jumps == other.jumps &&
           delayMs == other.delayMs &&
           tuned == other.tuned &&
@@ -352,6 +364,9 @@ class PeerStatus {
   final bool playing;
   final BigInt jumps;
 
+  /// Audio that arrived too late to play or that the host gave up sending (ms, cumulative).
+  final double lateMs;
+
   const PeerStatus({
     required this.id,
     required this.name,
@@ -372,6 +387,7 @@ class PeerStatus {
     required this.output,
     required this.playing,
     required this.jumps,
+    required this.lateMs,
   });
 
   @override
@@ -394,7 +410,8 @@ class PeerStatus {
       volume.hashCode ^
       output.hashCode ^
       playing.hashCode ^
-      jumps.hashCode;
+      jumps.hashCode ^
+      lateMs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -419,7 +436,8 @@ class PeerStatus {
           volume == other.volume &&
           output == other.output &&
           playing == other.playing &&
-          jumps == other.jumps;
+          jumps == other.jumps &&
+          lateMs == other.lateMs;
 }
 
 class TicketInfo {

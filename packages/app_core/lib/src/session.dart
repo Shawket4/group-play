@@ -73,6 +73,7 @@ final sessionProvider = NotifierProvider<SessionController, SessionState>(Sessio
 
 class SessionController extends Notifier<SessionState> {
   bool _hostLocalBeforeCapture = true;
+  bool _draggingDelay = false;
 
   @override
   SessionState build() {
@@ -82,7 +83,12 @@ class SessionController extends Notifier<SessionState> {
     }
     ref.listen(engineStatusProvider, (_, next) {
       final s = next.value;
-      if (s != null) unawaited(_remember(s));
+      if (s == null) return;
+      unawaited(_remember(s));
+      // the engine raises the live buffer by itself when speakers lose audio: follow it
+      if (s.role == 'host' && !_draggingDelay && s.playoutDelayMs != 0 && s.playoutDelayMs != state.playoutDelayMs) {
+        state = state.copyWith(playoutDelayMs: s.playoutDelayMs);
+      }
     });
     return const SessionState();
   }
@@ -332,11 +338,15 @@ class SessionController extends Notifier<SessionState> {
   /// The host's fine adjustment of its own timing.
   Future<void> setHostDelay(double ms) => _quietly(() => rust.setHostDelayMs(ms: ms));
 
-  void setPlayoutDelay(int ms) => state = state.copyWith(playoutDelayMs: ms);
+  void setPlayoutDelay(int ms) {
+    _draggingDelay = true;
+    state = state.copyWith(playoutDelayMs: ms);
+  }
 
   Future<void> applyPlayoutDelay(int ms) async {
     state = state.copyWith(playoutDelayMs: ms);
     await _quietly(() => rust.setPlayoutDelayMs(ms: ms));
+    _draggingDelay = false;
   }
 
   Future<bool> startHotspot() => _run(SessionAction.hotspot, () async {

@@ -167,6 +167,7 @@ class _PeerDetail extends ConsumerWidget {
             GPRow(title: 'Buffered', figure: true, value: formatMs(peer.bufferMs, digits: 0)),
             GPRow(title: 'Output latency', figure: true, value: formatMs(peer.latencyMs)),
             GPRow(title: 'Dropouts', figure: true, value: formatMs(peer.underrunMs, digits: 0)),
+            GPRow(title: 'Late audio', figure: true, value: formatMs(peer.lateMs, digits: 0)),
             GPRow(title: 'Resyncs', figure: true, value: '${peer.jumps}'),
             GPRow(title: 'Output', subtitle: peer.output.isEmpty ? '—' : peer.output),
           ],

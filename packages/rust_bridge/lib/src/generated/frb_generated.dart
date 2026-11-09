@@ -1031,8 +1031,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   EngineStatus dco_decode_engine_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return EngineStatus(
       role: dco_decode_String(arr[0]),
       state: dco_decode_String(arr[1]),
@@ -1043,10 +1043,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       pathRttMs: dco_decode_f_64(arr[6]),
       source: dco_decode_opt_String(arr[7]),
       streamRate: dco_decode_u_32(arr[8]),
-      peers: dco_decode_list_peer_status(arr[9]),
-      local: dco_decode_local_status(arr[10]),
-      endedReason: dco_decode_opt_String(arr[11]),
-      lastError: dco_decode_opt_String(arr[12]),
+      playoutDelayMs: dco_decode_u_32(arr[9]),
+      peers: dco_decode_list_peer_status(arr[10]),
+      local: dco_decode_local_status(arr[11]),
+      endedReason: dco_decode_opt_String(arr[12]),
+      lastError: dco_decode_opt_String(arr[13]),
     );
   }
 
@@ -1115,8 +1116,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   LocalStatus dco_decode_local_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 18)
-      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
+    if (arr.length != 19)
+      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
     return LocalStatus(
       output: dco_decode_String(arr[0]),
       outputError: dco_decode_opt_String(arr[1]),
@@ -1125,17 +1126,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       errMs: dco_decode_f_64(arr[4]),
       bufferMs: dco_decode_f_64(arr[5]),
       underrunMs: dco_decode_f_64(arr[6]),
-      jumps: dco_decode_u_64(arr[7]),
-      delayMs: dco_decode_f_64(arr[8]),
-      tuned: dco_decode_bool(arr[9]),
-      volume: dco_decode_f_64(arr[10]),
-      enabled: dco_decode_bool(arr[11]),
-      playing: dco_decode_bool(arr[12]),
-      syncValid: dco_decode_bool(arr[13]),
-      syncRttMs: dco_decode_f_64(arr[14]),
-      syncOffsetMs: dco_decode_f_64(arr[15]),
-      skewPpm: dco_decode_f_64(arr[16]),
-      syncSamples: dco_decode_u_32(arr[17]),
+      lateMs: dco_decode_f_64(arr[7]),
+      jumps: dco_decode_u_64(arr[8]),
+      delayMs: dco_decode_f_64(arr[9]),
+      tuned: dco_decode_bool(arr[10]),
+      volume: dco_decode_f_64(arr[11]),
+      enabled: dco_decode_bool(arr[12]),
+      playing: dco_decode_bool(arr[13]),
+      syncValid: dco_decode_bool(arr[14]),
+      syncRttMs: dco_decode_f_64(arr[15]),
+      syncOffsetMs: dco_decode_f_64(arr[16]),
+      skewPpm: dco_decode_f_64(arr[17]),
+      syncSamples: dco_decode_u_32(arr[18]),
     );
   }
 
@@ -1161,8 +1163,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PeerStatus dco_decode_peer_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 19)
-      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
+    if (arr.length != 20)
+      throw Exception('unexpected arr length: expect 20 but see ${arr.length}');
     return PeerStatus(
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
@@ -1183,6 +1185,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       output: dco_decode_String(arr[16]),
       playing: dco_decode_bool(arr[17]),
       jumps: dco_decode_u_64(arr[18]),
+      lateMs: dco_decode_f_64(arr[19]),
     );
   }
 
@@ -1313,6 +1316,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_pathRttMs = sse_decode_f_64(deserializer);
     var var_source = sse_decode_opt_String(deserializer);
     var var_streamRate = sse_decode_u_32(deserializer);
+    var var_playoutDelayMs = sse_decode_u_32(deserializer);
     var var_peers = sse_decode_list_peer_status(deserializer);
     var var_local = sse_decode_local_status(deserializer);
     var var_endedReason = sse_decode_opt_String(deserializer);
@@ -1327,6 +1331,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       pathRttMs: var_pathRttMs,
       source: var_source,
       streamRate: var_streamRate,
+      playoutDelayMs: var_playoutDelayMs,
       peers: var_peers,
       local: var_local,
       endedReason: var_endedReason,
@@ -1431,6 +1436,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_errMs = sse_decode_f_64(deserializer);
     var var_bufferMs = sse_decode_f_64(deserializer);
     var var_underrunMs = sse_decode_f_64(deserializer);
+    var var_lateMs = sse_decode_f_64(deserializer);
     var var_jumps = sse_decode_u_64(deserializer);
     var var_delayMs = sse_decode_f_64(deserializer);
     var var_tuned = sse_decode_bool(deserializer);
@@ -1450,6 +1456,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       errMs: var_errMs,
       bufferMs: var_bufferMs,
       underrunMs: var_underrunMs,
+      lateMs: var_lateMs,
       jumps: var_jumps,
       delayMs: var_delayMs,
       tuned: var_tuned,
@@ -1519,6 +1526,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_output = sse_decode_String(deserializer);
     var var_playing = sse_decode_bool(deserializer);
     var var_jumps = sse_decode_u_64(deserializer);
+    var var_lateMs = sse_decode_f_64(deserializer);
     return PeerStatus(
       id: var_id,
       name: var_name,
@@ -1539,6 +1547,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       output: var_output,
       playing: var_playing,
       jumps: var_jumps,
+      lateMs: var_lateMs,
     );
   }
 
@@ -1688,6 +1697,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_64(self.pathRttMs, serializer);
     sse_encode_opt_String(self.source, serializer);
     sse_encode_u_32(self.streamRate, serializer);
+    sse_encode_u_32(self.playoutDelayMs, serializer);
     sse_encode_list_peer_status(self.peers, serializer);
     sse_encode_local_status(self.local, serializer);
     sse_encode_opt_String(self.endedReason, serializer);
@@ -1791,6 +1801,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_64(self.errMs, serializer);
     sse_encode_f_64(self.bufferMs, serializer);
     sse_encode_f_64(self.underrunMs, serializer);
+    sse_encode_f_64(self.lateMs, serializer);
     sse_encode_u_64(self.jumps, serializer);
     sse_encode_f_64(self.delayMs, serializer);
     sse_encode_bool(self.tuned, serializer);
@@ -1856,6 +1867,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.output, serializer);
     sse_encode_bool(self.playing, serializer);
     sse_encode_u_64(self.jumps, serializer);
+    sse_encode_f_64(self.lateMs, serializer);
   }
 
   @protected

@@ -81,7 +81,7 @@ async fn live_fd_capture_streams_and_keeps_rate() {
         let start = now_ns();
         let mut written: u64 = 0;
         let rate = 48_000.0 * (1.0 + 50e-6);
-        for _ in 0..600 {
+        for _ in 0..900 {
             let due = ((now_ns() - start) as f64 / 1e9 * rate) as u64;
             if due > written {
                 let n = (due - written) as usize;
@@ -108,6 +108,14 @@ async fn live_fd_capture_streams_and_keeps_rate() {
     // what plays now must already be on the guest, with roughly the playout delay of margin
     let margin_ms = (guest.local().ring.highest() as f64 - g as f64) / 48.0;
     assert!(margin_ms > 100.0 && margin_ms < 600.0, "margin {margin_ms} ms");
+    // a bigger buffer mid-stream: everyone moves together, and the margin grows to match
+    host.set_playout_delay_ms(700);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let p1 = now_ns();
+    let (h, g) = (frame_heard_at(host.local(), p1), frame_heard_at(guest.local(), p1));
+    assert!((h - g).abs() <= 48, "after raising the delay: host {h} vs guest {g}");
+    let margin_ms = (guest.local().ring.highest() as f64 - g as f64) / 48.0;
+    assert!(margin_ms > 500.0 && margin_ms < 1000.0, "margin after raising {margin_ms} ms");
     writer.join().unwrap();
     guest.leave().await;
     host.shutdown().await;

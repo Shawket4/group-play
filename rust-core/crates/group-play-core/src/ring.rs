@@ -58,6 +58,24 @@ impl PcmRing {
         }
     }
 
+    /// Writes interleaved stereo s16le bytes (as they come off the wire) starting at `first_frame`.
+    pub fn write_s16le(&self, first_frame: u64, bytes: &[u8]) {
+        let frames = bytes.len() / (CHANNELS * 2);
+        let mut g = self.inner.lock();
+        let cap = g.capacity;
+        for (i, b) in bytes.chunks_exact(CHANNELS * 2).enumerate() {
+            let f = first_frame + i as u64;
+            let slot = (f % cap as u64) as usize;
+            g.samples[slot * CHANNELS] = i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0;
+            g.samples[slot * CHANNELS + 1] = i16::from_le_bytes([b[2], b[3]]) as f32 / 32768.0;
+            g.tags[slot] = f + 1;
+        }
+        let end = first_frame + frames as u64;
+        if end > g.highest {
+            g.highest = end;
+        }
+    }
+
     /// One past the newest frame received.
     pub fn highest(&self) -> u64 {
         self.inner.lock().highest
@@ -134,6 +152,20 @@ mod tests {
             assert!(rd.frame(0).is_none());
             assert!(rd.frame(8).is_some());
         });
+    }
+
+    #[test]
+    fn wire_bytes_match_i16() {
+        let pcm = [-3i16, 7, i16::MIN, i16::MAX];
+        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let (a, b) = (PcmRing::new(8), PcmRing::new(8));
+        a.write_i16(5, &pcm);
+        b.write_s16le(5, &bytes);
+        a.with_reader(|ra| b.with_reader(|rb| {
+            assert_eq!(ra.frame(5), rb.frame(5));
+            assert_eq!(ra.frame(6), rb.frame(6));
+            assert_eq!(ra.highest(), rb.highest());
+        }));
     }
 
     #[test]
