@@ -263,9 +263,21 @@ fn output_thread(shared: Arc<PlayerShared>, stop: Arc<AtomicBool>) {
                     log::error!("output: play failed: {e}");
                     *shared.error.lock() = Some(format!("play: {e}"));
                 }
+                let built = now_ns();
+                let mut latency_logged = false;
                 while !stop.load(Ordering::Relaxed) && !failed.load(Ordering::Relaxed) {
                     thread::sleep(Duration::from_millis(50));
                     refresh_ios_latency();
+                    if !latency_logged && shared.last_callback_ns.load(Ordering::Relaxed) != 0 && now_ns() - built > 1_000_000_000 {
+                        latency_logged = true;
+                        let ms = shared.latency_ns.load(Ordering::Relaxed) as f64 / 1e6;
+                        if ms.abs() < 1.0 {
+                            // the device gave no presentation timestamp: playback is late by its whole output latency
+                            log::warn!("output: no hardware timestamp (latency {ms:.1} ms); this phone will sound late");
+                        } else {
+                            log::info!("output: latency {ms:.1} ms");
+                        }
+                    }
                     // A stream whose callback stopped for 2 s (device lost without an error) is rebuilt too.
                     let last = shared.last_callback_ns.load(Ordering::Relaxed);
                     if last != 0 && now_ns() - last > 2_000_000_000 {

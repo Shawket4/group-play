@@ -75,6 +75,7 @@ class ShellCaptureService() : IShellCapture.Stub() {
             rec.release()
             throw IllegalStateException("REMOTE_SUBMIX did not start recording")
         }
+        Log.i(TAG, "remote_submix media volume now ${submixVolume() ?: "unknown"} (after the route opened)")
         val pipe = ParcelFileDescriptor.createPipe()
         val out = FileOutputStream(pipe[1].fileDescriptor)
         record = rec
@@ -119,7 +120,8 @@ class ShellCaptureService() : IShellCapture.Stub() {
             val out = p.inputStream.bufferedReader().readText() + p.errorStream.bufferedReader().readText()
             val code = p.waitFor()
             if (code == 0 && !out.contains("Unknown command", ignoreCase = true) && !out.contains("Error", ignoreCase = true)) {
-                Log.i(TAG, "remote_submix media volume -> $max/$max: ${out.trim()}")
+                // the shell prints the call it makes, not whether it applied: read the index back
+                Log.i(TAG, "remote_submix media volume -> $max/$max asked, reads ${submixVolume() ?: "unknown"}: ${out.trim()}")
                 return
             }
             Log.w(TAG, "cmd audio set-device-volume: exit $code: ${out.trim()}")
@@ -141,6 +143,16 @@ class ShellCaptureService() : IShellCapture.Stub() {
         } catch (e: Throwable) {
             Log.w(TAG, "setStreamVolumeIndexAS failed: ${e.message}")
         }
+    }
+
+    /** The REMOTE_SUBMIX music volume index (hidden AudioSystem.getStreamVolumeIndex), or null. */
+    private fun submixVolume(): Int? = try {
+        Class.forName("android.media.AudioSystem")
+            .getMethod("getStreamVolumeIndex", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .invoke(null, 3, DEVICE_OUT_REMOTE_SUBMIX) as Int
+    } catch (e: Throwable) {
+        Log.w(TAG, "reading the remote_submix volume failed: ${e.javaClass.simpleName}: ${e.message}")
+        null
     }
 
     @Synchronized

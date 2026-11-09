@@ -638,6 +638,34 @@ fn run_pull(mut src: Box<dyn PullSource>, shared: &Shared, stop: &AtomicBool) ->
     Ok(())
 }
 
+/// Peak and RMS of i16 PCM over a window, in dBFS.
+#[derive(Default)]
+struct Level {
+    peak: i32,
+    sum_sq: f64,
+    samples: u64,
+}
+
+impl Level {
+    fn add(&mut self, pcm: &[i16]) {
+        for &s in pcm {
+            let s = s as i32;
+            self.peak = self.peak.max(s.abs());
+            self.sum_sq += (s * s) as f64;
+        }
+        self.samples += pcm.len() as u64;
+    }
+
+    fn peak_db(&self) -> f64 {
+        20.0 * (self.peak.max(1) as f64 / 32768.0).log10()
+    }
+
+    fn rms_db(&self) -> f64 {
+        let ms = self.sum_sq / self.samples.max(1) as f64;
+        10.0 * (ms.max(1.0) / (32768.0 * 32768.0)).log10()
+    }
+}
+
 /// Live capture. Frames arrive in real time on the *capture* clock; the timeline's rate is
 /// adjusted (PI loop) so the margin between arrival and playout stays at `delay_ns`.
 fn run_fd(mut reader: FdReader, rate: u32, label: String, delay_ns: i64, shared: &Shared, stop: &AtomicBool) -> Result<()> {
@@ -659,6 +687,7 @@ fn run_fd(mut reader: FdReader, rate: u32, label: String, delay_ns: i64, shared:
     let mut window_best: f64 = f64::MIN; // best (largest) slack in the current window
     let mut window_start = now_ns();
     let mut integral = 0.0;
+    let mut level = Level::default();
     while !stop.load(Ordering::Relaxed) {
         pcm.clear();
         let n = reader.read_frames(&mut pcm, chunk)?;
@@ -667,6 +696,12 @@ fn run_fd(mut reader: FdReader, rate: u32, label: String, delay_ns: i64, shared:
             break;
         }
         let now = now_ns();
+        level.add(&pcm);
+        if level.samples >= rate as u64 * 2 * 5 {
+            // every ~5 s: how loud the capture is (a quiet host or speakers start here)
+            log::info!("capture: level peak {:.1} dBFS, rms {:.1} dBFS", level.peak_db(), level.rms_db());
+            level = Level::default();
+        }
         shared.chunk(id, next, &pcm);
         next += n as u64;
         // slack: how long before its playout the newest frame arrived
@@ -793,7 +828,7 @@ async fn serve_guest(conn: Connection, shared: Arc<Shared>) -> Result<()> {
             }
             .await;
             if let Err(e) = res {
-                log::debug!("host: media pump ended: {e:#}");
+                log::warn!("host: media pump ended: {e:#}");
             }
         })
     };
@@ -846,5 +881,21 @@ async fn answer_pings(conn: Connection) {
                 let _ = conn.send_datagram(b.into());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Level;
+
+    #[test]
+    fn level_in_dbfs() {
+        let mut full = Level::default();
+        full.add(&[32767, -32768, 32767, -32768]);
+        assert!(full.peak_db().abs() < 0.01 && full.rms_db().abs() < 0.01);
+        let mut half = Level::default();
+        half.add(&[16384, -16384]);
+        assert!((half.peak_db() + 6.02).abs() < 0.01 && (half.rms_db() + 6.02).abs() < 0.01);
+        assert!(Level::default().rms_db() < -90.0); // silence, no NaN
     }
 }

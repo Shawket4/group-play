@@ -324,7 +324,7 @@ async fn media_loop(conn: Connection, shared: Arc<Shared>) {
     }
     .await;
     if let Err(e) = res {
-        log::debug!("guest: media ended: {e:#}");
+        log::warn!("guest: media ended: {e:#}");
     }
 }
 
