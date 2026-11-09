@@ -75,7 +75,15 @@ class ShellCaptureService() : IShellCapture.Stub() {
             rec.release()
             throw IllegalStateException("REMOTE_SUBMIX did not start recording")
         }
-        Log.i(TAG, "remote_submix media volume now ${submixVolume() ?: "unknown"} (after the route opened)")
+        // Android skips a device-volume change while that device is in use, which is why full
+        // sharing was only sometimes loud: if the boost didn't land, set it again now it's open.
+        val now = submixVolume()
+        if (now != null && now < maxMusicVolume()) {
+            Log.w(TAG, "remote_submix media volume is $now after the route opened; raising it again")
+            raiseSubmixVolume()
+        } else {
+            Log.i(TAG, "remote_submix media volume ${now ?: "unknown"} after the route opened")
+        }
         val pipe = ParcelFileDescriptor.createPipe()
         val out = FileOutputStream(pipe[1].fileDescriptor)
         record = rec
@@ -107,13 +115,15 @@ class ShellCaptureService() : IShellCapture.Stub() {
         return pipe[0]
     }
 
+    private fun maxMusicVolume(): Int = try {
+        (ShellContext.get().getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager)
+            .getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+    } catch (e: Throwable) {
+        15
+    }
+
     private fun raiseSubmixVolume() {
-        val max = try {
-            (ShellContext.get().getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager)
-                .getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
-        } catch (e: Throwable) {
-            15
-        }
+        val max = maxMusicVolume()
         // Android 14+: `cmd audio set-device-volume <stream> <index> <native device>` (shell may use it).
         try {
             val p = Runtime.getRuntime().exec(arrayOf("cmd", "audio", "set-device-volume", "3", "$max", "$DEVICE_OUT_REMOTE_SUBMIX"))

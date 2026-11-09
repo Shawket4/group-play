@@ -3,6 +3,7 @@
 
 package com.shawket.groupplay
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
@@ -13,8 +14,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 
 class SessionService : Service() {
@@ -27,6 +30,7 @@ class SessionService : Service() {
         lastText = text
         when (intent?.action) {
             ACTION_STOP -> {
+                releaseLocks()
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -56,7 +60,36 @@ class SessionService : Service() {
         return START_NOT_STICKY
     }
 
+    // Held for the whole session: the CPU keeps serving speakers with the screen off, and Wi-Fi
+    // stays out of power save (its wake-ups add 100+ ms of jitter, which reads as dropouts).
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    @SuppressLint("WakelockTimeout")
+    private fun holdLocks() {
+        if (wakeLock == null) {
+            wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GroupPlay:session")
+                .apply { setReferenceCounted(false); acquire() }
+        }
+        if (wifiLock == null) {
+            @Suppress("DEPRECATION")
+            val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifiLock = (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
+                .createWifiLock(mode, "GroupPlay:session")
+                .apply { setReferenceCounted(false); acquire() }
+        }
+    }
+
+    private fun releaseLocks() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
+    }
+
     private fun startForegroundCompat(title: String, text: String, projection: Boolean) {
+        holdLocks()
         val n = notification(this, title, text)
         if (Build.VERSION.SDK_INT >= 29) {
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
@@ -72,6 +105,7 @@ class SessionService : Service() {
     }
 
     override fun onDestroy() {
+        releaseLocks()
         CaptureManager.stopAll()
         super.onDestroy()
     }

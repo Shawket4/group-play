@@ -4,7 +4,9 @@
 package com.shawket.groupplay
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionConfig
@@ -13,6 +15,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -194,6 +198,7 @@ class GroupPlayChannel(private val activity: MainActivity, messenger: BinaryMess
 
             "startSessionService" -> {
                 SessionService.start(activity, call.argument<String>("title") ?: "Group Play", call.argument<String>("text") ?: "Session running")
+                askBackgroundExemptionOnce()
                 result.success(null)
             }
 
@@ -236,12 +241,25 @@ class GroupPlayChannel(private val activity: MainActivity, messenger: BinaryMess
         }
     }
 
+    /** Once per install: ask to skip battery optimization, so the system (One UI especially) doesn't kill a running session. */
+    @SuppressLint("BatteryLife")
+    private fun askBackgroundExemptionOnce() {
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val prefs = activity.getSharedPreferences("group_play", Context.MODE_PRIVATE)
+        if (pm.isIgnoringBatteryOptimizations(activity.packageName) || prefs.getBoolean(KEY_ASKED_BATTERY, false)) return
+        prefs.edit().putBoolean(KEY_ASKED_BATTERY, true).apply()
+        try {
+            activity.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${activity.packageName}")))
+        } catch (_: Throwable) {}
+    }
+
     private fun openUrl(url: String) {
         activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     companion object {
         private const val SHIZUKU_CODE = 4242
+        private const val KEY_ASKED_BATTERY = "askedBatteryExemption"
         private const val SHIZUKU_URL = "https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api"
     }
 }

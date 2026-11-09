@@ -99,7 +99,7 @@ object CaptureManager {
                     shellConn = null
                     if (mode == "output") {
                         mode = null
-                        onStopped?.invoke("the capture service stopped (Shizuku restarted?)")
+                        onStopped?.invoke("Shizuku stopped. Start it again in the Shizuku app, then tap Phone Audio.")
                     }
                 }
             }

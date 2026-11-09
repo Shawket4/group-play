@@ -24,13 +24,51 @@ import UIKit
 }
 
 enum GroupPlayAudioSession {
+  private static var observing = false
+
   static func configure() {
     let session = AVAudioSession.sharedInstance()
     do {
-      try session.setCategory(.playback, mode: .default, options: [])
+      // mixWithOthers: another app's audio on this phone must not interrupt the speaker. An
+      // interrupted session is inactive, and iOS suspends a background app with no active audio.
+      try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
       try session.setActive(true)
     } catch {
       NSLog("group-play: audio session setup failed: \(error)")
+    }
+    observe()
+  }
+
+  /// Calls, Siri and alarms still interrupt: take the session back when they end. The engine
+  /// notices its output stopped and rebuilds it on its own once the session is active again.
+  private static func observe() {
+    guard !observing else { return }
+    observing = true
+    let nc = NotificationCenter.default
+    nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { note in
+      let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+      let ended = raw.flatMap(AVAudioSession.InterruptionType.init) == .ended
+      NSLog("group-play: audio interruption \(ended ? "ended" : "began")")
+      if ended { reactivate() }
+    }
+    nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { _ in
+      NSLog("group-play: media services were reset")
+      configure()
+    }
+    nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
+      NSLog("group-play: entered background")
+    }
+    nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { _ in
+      NSLog("group-play: entering foreground")
+      reactivate()
+    }
+  }
+
+  private static func reactivate() {
+    do {
+      try AVAudioSession.sharedInstance().setActive(true)
+    } catch {
+      NSLog("group-play: reactivating the audio session failed: \(error)")
     }
   }
 
