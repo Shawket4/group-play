@@ -1,0 +1,22 @@
+name: feature_speaker
+description: "Group Play — the speaker screen: sync status, calibration, diagnostics."
+version: 0.1.0
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.13.0
+  flutter: ">=3.41.0"
+
+dependencies:
+  app_core: ^0.1.0
+  design_system: ^0.1.0
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^3.5.0
+  go_router: ^18.1.0
+  rust_bridge: ^0.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter

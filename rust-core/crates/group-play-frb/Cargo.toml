@@ -1,0 +1,26 @@
+[package]
+name = "group_play_frb"
+description = "flutter_rust_bridge surface of the Group Play engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "group_play_frb"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+group-play-core = { path = "../group-play-core" }
+# Exact pin: the generated Dart code checks this version at startup (same trap as Madar POS).
+flutter_rust_bridge = "=2.13.0"
+anyhow.workspace = true
+log.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni-sys = "0.4"
+ndk-context = "0.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

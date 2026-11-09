@@ -1,0 +1,27 @@
+name: rust_bridge
+description: Group Play FFI bridge to group-play-core via flutter_rust_bridge (generated, do not hand-edit lib/src/generated).
+version: 0.1.0
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.13.0
+  flutter: ">=3.41.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Exact version by FRB's design: must equal the codegen CLI and the group-play-frb cargo
+  # dependency (2.13.0). Upgrade all three together, then `melos run bridge`.
+  flutter_rust_bridge: 2.13.0
+
+# FFI plugin: no Dart platform code — Cargokit builds group-play-frb per platform.
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true
+      linux:
+        ffiPlugin: true

@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application>
+        <!-- Debug builds only: see DebugProbeReceiver.kt for the adb broadcast that runs it
+             (captures, plays a test tone, logs RMS under tag gp-probe). -->
+        <receiver android:name=".DebugProbeReceiver" android:exported="true" />
+    </application>
+</manifest>

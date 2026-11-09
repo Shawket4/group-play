@@ -31,6 +31,7 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+**/build/
 /coverage/
 
 # Symbolication related
@@ -48,4 +49,14 @@ app.*.map.json
 .widget_preview/
 
 # Rust
-/rust/target/
+**/target/
+
+# Flutter workspace
+**/.dart_tool/
+**/.flutter-plugins-dependencies
+**/ios/Flutter/ephemeral/
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/linux/flutter/ephemeral/
+**/android/local.properties
+**/android/.gradle/
