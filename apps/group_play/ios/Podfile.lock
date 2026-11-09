@@ -1,0 +1,22 @@
+PODS:
+  - Flutter (1.0.0)
+  - rust_bridge (0.0.1):
+    - Flutter
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+  - rust_bridge (from `.symlinks/plugins/rust_bridge/ios`)
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+  rust_bridge:
+    :path: ".symlinks/plugins/rust_bridge/ios"
+
+SPEC CHECKSUMS:
+  Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
+  rust_bridge: 5f3a219e61431d1d476b440f26d836066ee5a436
+
+PODFILE CHECKSUM: e326531272e27a4d7731d5362e141b1ccd2b57de
+
+COCOAPODS: 1.16.2
